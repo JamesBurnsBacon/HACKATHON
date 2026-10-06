@@ -1,12 +1,12 @@
 # PerpParrot 🦜
 
-> Copy the best Hyperliquid perps traders and vaults, picked by quant screens and Claude, orchestrated by Chainlink CRE.
+> Copy the best Hyperliquid perps traders and vaults, picked by quant screens and an AI agent, orchestrated by Chainlink CRE.
 >
 > **TOKEN2049 Origins Hackathon** · Tracks: **Chainlink (CRE)** · **AI x Crypto** · Status: design doc, no code yet
 
 **TL;DR**
 - Score Hyperliquid addresses (traders, HyperCore vaults, ERC-4626 vaults) on risk-adjusted performance.
-- Claude helps pick a set of **5–25 source wallets**.
+- An LLM agent picks a set of **5–25 source wallets**. Two models are compared in the backtest, and the winner runs live.
 - Every 10 minutes, Chainlink CRE verifies their positions and emits a signed rebalance report.
 - An executor holds the **weighted, netted** copy of those positions in our own Hyperliquid account (5 HYPE, about $470).
 - **The backtest is the proof:** in-sample selection vs. out-of-sample results over 2 weeks, 1 month, 6 weeks and 3 months, compared with holding BTC. The ~5 h live run shows the machinery working.
@@ -38,7 +38,7 @@
 **Video storyline (~3 min):**
 1. **Funnel:** ~14.5k "profitable" leaderboard addresses → our filters → the source set. Show why most fail.
 2. **Backtest:** OOS equity curves for 2 weeks, 1 month, 6 weeks and 3 months vs. holding BTC. *This is the value claim.*
-3. **Finalist drill-down:** metrics, Claude's rationale, red flags.
+3. **Finalist drill-down:** metrics, the agent's rationale, red flags.
 4. **Live:** the CRE run log, HyperEVM decision hashes, executor fills, and per-source PnL attribution over the ~5 h live window.
 
 ## 2. Terminology
@@ -55,7 +55,7 @@
 ```
  BACKEND (Railway)                    CRE: review (hourly)            CRE: mirror (every 10 min)         EXECUTOR (serverless)
 ┌──────────────────────────┐ shortlist ┌───────────────────────┐ notes ┌─────────────────────────────┐ signed ┌──────────────────────┐
-│ leaderboard + vault list │──────────►│ Claude (Sonnet 5.5)   │──────►│ fetch positions snapshot (1)│ report │ verify DON signature │
+│ leaderboard + vault list │──────────►│ LLM agent (2 models)  │──────►│ fetch positions snapshot (1)│ report │ verify DON signature │
 │ ingest → label → score   │           │ monitor sources, flag │       │ spot-check ~10 sources (HL) │───────►│ dedupe report ID     │──► Hyperliquid
 │ backtest · ledger        │ positions │ risks, write rationale│       │ slices → net → diff vs. ours│        │ sign w/ API wallet   │    (our account)
 │ positions snapshot API   │──────────►└───────────────────────┘       │ report() → executor+HyperEVM│        └──────────┬───────────┘
@@ -82,8 +82,8 @@
 ### 4.2 Score (backend)
 1. **Hard filters:**
    - ≥ $10k account value / TVL
-   - ≥ 30 days of history
-   - a minimum trade count
+   - **≥ 30 days active**
+   - **≥ 10 trades**
    - not closed
 2. **Metrics:** computed from PnL history, not account value, so deposits and withdrawals don't count as returns.
    - Sharpe, Sortino, Calmar
@@ -91,20 +91,22 @@
    - PnL consistency
    - realized volatility
    - average leverage
-3. **Composite score → ~25 finalists**, which are handed to Claude (§4.6). ❓ *Weights.*
+3. **Composite score = average percentile rank** across metrics (Sortino, Calmar, consistency, −max drawdown, …). This is robust to outliers and needs no scale tuning. **Top ~25 → finalists** for the agent (§4.6).
 
 ### 4.3 Buckets (risk tiers)
-- Finalists are tiered by **realized volatility + average leverage**. ❓ *Is tiering purely algorithmic, or can Claude override a tier with a justification?*
+- Finalists are tiered by **realized volatility + average leverage**. ❓ *Is tiering purely algorithmic, or can the agent override a tier with a justification?*
 - **Aggressive (live):** the source set with leverage mirrored exactly, no cap.
 - **Balanced:** the **same source set as Aggressive**, with leverage scaled down or capped. ❓ *How: e.g. ×0.5 exposure or a portfolio leverage cap? Decide after the backtests.*
 - **Conservative:** the low-vol / low-leverage tier, with leverage capped.
-- **Claude** assigns weights within each tier and writes the rationale.
+- **The agent** assigns weights within each tier and writes the rationale.
 
 ### 4.4 Copy model: virtual ledger
 - **Slice** for source `i`, asset `c`: `slice_i,c = wᵢ × (nᵢ,c / Eᵢ) × E_ours`.
   - `nᵢ,c` is the source's signed notional in asset `c`.
   - `Eᵢ` is the source's **current** equity, and `E_ours` is ours. Scaling by current equity means we copy the source's exposure ratio, so its deposits and withdrawals don't distort our size.
+- **Flat is not a signal:** each run, weights are **renormalized over sources that currently hold positions**: `wᵢ' = wᵢ / Σ_active wⱼ`. One source going flat doesn't shrink our total exposure.
 - **Position** in asset `c` = `Σᵢ slice_i,c`, netted only at order time.
+- **Reconciliation:** the ledger is the *target* and the account is the *truth*. Each run diffs the targets against the real account, so partial fills, skipped legs and partial liquidations self-correct with no separate repair logic. Per-source PnL attributes realized fills pro-rata.
 - **Trade a leg only if** the gap between the target and our position is **≥ $10 and ≥ 10%** of the target.
 - **Which assets get mirrored:**
   - validator perps, plus **HIP-3 perps with USDC collateral**
@@ -113,7 +115,7 @@
 - The ledger is stored in Supabase. It enables per-source PnL attribution and clean removals (§4.5).
 
 ### 4.5 Source-set changes
-**Hackathon: the set is fully frozen at go-live (~Wed 19:00 SGT).** No reselection and no ejections. The hourly Claude run monitors and comments only.
+**Hackathon: the set is fully frozen at go-live (~Wed 19:00 SGT).** No reselection and no ejections. The hourly agent run monitors and comments only.
 
 **Production design** (reselection daily or weekly). Removals come in two distinct types:
 
@@ -124,23 +126,31 @@
 
 ❓ *What are the per-tier values of N, the type-A time limit, and the DCA spacing?*
 
-### 4.6 AI layer: Claude inside the CRE `review` workflow (hourly)
+### 4.6 AI layer: LLM agent inside the CRE `review` workflow (hourly)
 This is a dedicated workstream, integrated into the CRE flow.
-- **Role (before go-live):** Claude **picks 5–25 sources from the ~25 algo finalists** and assigns weights, with a rationale and red flags (martingale, wash-like behavior, concentration, near-liquidation). The algo sets the minimum bar; Claude adds judgment.
+- **Role (before go-live):** the agent **picks 5–25 sources from the ~25 algo finalists** and assigns weights, with a rationale and red flags (martingale, wash-like behavior, concentration, near-liquidation). The algo sets the minimum bar; the agent adds judgment.
+- **The agent also judges:**
+  - **Diversification:** near-duplicate sources, using the return-correlation matrix plus vault ↔ leader address links.
+  - **Time in market:** *flat is not a signal*, so avoid sources that are often flat.
 - **After go-live:** monitoring and commentary only. The set stays frozen.
 - **Inputs for each finalist:**
   - the metrics table and kind
   - an equity-curve summary (~30 daily points)
   - current positions (asset, size, leverage, distance to liquidation)
   - recent trade patterns (frequency, holding time, averaging down)
+  - time in market
+  - the finalists' correlation matrix and vault ↔ leader links
   - **Budget:** ≈ 25 × ≤ 4 KB, which keeps the prompt under CRE's **120 KB request limit**.
-- **Model:** Claude Sonnet 5.5 (`claude-sonnet-5-5`) with structured JSON output. The API key is a CRE secret, which is acceptable since every node can read it.
-- **Consensus:** ❓ *Open. Suggested: **every DON node calls Claude** and we run **per-field consensus**. That's truly decentralized AI, at N× the API calls per run. The alternative is a single call via `cacheSettings`.*
+- **Models:** **two models are compared in the backtest; at least one is from OpenAI.** ❓ *Which two (e.g. Claude Sonnet 5.5 vs. an OpenAI model)?* **The backtest winner drives the live set.**
+  - Structured JSON output.
+  - API keys are CRE secrets, which is acceptable since every node can read them.
+- **Consensus:** ❓ *Open. Suggested: **every DON node calls the model** and we run **per-field consensus**. That's truly decentralized AI, at N× the API calls per run. The alternative is a single call via `cacheSettings`.*
 - **Output format:** ❓ *Open. Options:*
   - *a discrete weight grid (e.g. 0–3 units), which works well with identical-result consensus*
   - *continuous weights with median consensus*
   - *a ranking plus a fixed weight formula*
-- **Proving value:** the backtest compares **algo-only top-N vs. algo + Claude** (§4.9).
+- **Proving value:** the backtest compares **algo-only top-N vs. algo + model A vs. algo + model B** (§4.9).
+- **Live shadow:** after go-live, the losing model's picks are tracked **on paper** (no orders), so the video can show both side by side.
 - ❓ *AI workstream's first deliverables, so others can build in parallel. Candidates:*
   - *frozen I/O JSON schemas*
   - *a prompt plus an offline eval script*
@@ -157,10 +167,14 @@ That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
 
 ### 4.8 Execute (serverless executor)
 - Verify the DON signature and dedupe by report ID.
+- **Sanity bounds:** reject a report if its source set differs from the frozen set, or if total notional exceeds a bound (e.g. 50× equity).
 - Send **IOC limit orders priced at mark ± a slippage cap**. Any unfilled remainder is retried on the next run.
 - **Keys:** a fresh EOA. A human holds the master key; the executor holds only an **HL API wallet** key (trade, no withdraw).
 - **Leverage:** mirrored exactly (Aggressive). Set via `updateLeverage`, cross margin.
-- **Kill switch:** manual only (a Supabase flag).
+- **Kill switch:** manual only, with two buttons that any team member can press (Supabase auth):
+  - **Pause:** stop trading and keep positions.
+  - **Flatten:** close everything.
+- **Alerts:** a Telegram bot reports rejected runs, failed orders and big drawdowns, with a link to the dashboard.
 - **Capital:** 5 HYPE, currently **on HyperEVM**.
   - Keep **~0.1 HYPE on HyperEVM** for the consumer contract's gas.
   - Move ~4.9 HYPE to HyperCore by sending it to the HYPE system address `0x2222…2222` (verify in a spike).
@@ -174,8 +188,10 @@ That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
   - This follows from §4.4: equity-ratio scaling makes our return a weighted sum of source returns.
 - **In-sample** is all of an address's history **before** the cut. **Out-of-sample** windows are the **last 2 weeks, 1 month, 6 weeks, and 3 months**.
 - Report each window against holding BTC.
-- **Algo-only vs. algo + Claude:** at each OOS cutoff, Claude sees **only data from before the cut** and picks from the algo finalists. Compare its picks' OOS returns with the algo's top-N.
-  - ⚠️ Point-in-time *positions and trade patterns* can only be rebuilt from fills (≤ 10k most recent). The backtest-time Claude may therefore get only metrics plus the truncated equity curve. Disclose this.
+- **Algo-only vs. model A vs. model B:** at each OOS cutoff, each model sees **only data from before the cut** and picks from the algo finalists. Compare OOS returns; the winner selects the live set.
+  - **One cutoff per window:** 4 cutoffs × 2 models, plus algo-only.
+  - **No peeking:** prompts are **anonymized** (no addresses, display names, vault names or calendar dates) and **truncated** at the cut, so the models can't recall famous wallets or market events.
+  - ⚠️ Point-in-time *positions and trade patterns* can only be rebuilt from fills (≤ 10k most recent). The backtest-time agent may therefore get only metrics plus the truncated equity curve. Disclose this.
 - **Data resolution:** OOS windows within the last 30 days have ≈ daily points (`month` window). The 6-week and 3-month windows only have ≈ weekly points (`allTime`).
 - **Caveat:** the leaderboard is a *current* snapshot, so every address is a survivor and the backtest flatters us. State this in the video.
 - *Stretch:* position replay from fills (≤ 10k most recent per address), simulating the 10-minute loop, the $10 minimum and netting.
@@ -184,7 +200,7 @@ That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
 The kill switch and admin actions sit behind auth.
 - the funnel
 - backtest charts for each OOS window vs. BTC
-- finalist drill-down with Claude's rationale
+- finalist drill-down with the agent's rationale
 - buckets
 - live net positions vs. targets
 - **per-source PnL from the ledger**
@@ -210,7 +226,7 @@ The kill switch and admin actions sit behind auth.
 | Orchestration | Chainlink CRE, `@chainlink/cre-sdk` + `cre` CLI, with DON access from the sponsor on-site |
 | Onchain log | CRE consumer contract on HyperEVM |
 | Prices | **Hyperliquid's own oracle/mark prices** via the Info API (`metaAndAssetCtxs` → `oraclePx` / `markPx`). BTC benchmark history comes from `candleSnapshot`. We don't use Chainlink Data Feeds. |
-| AI | Claude API, `claude-sonnet-5-5`, structured JSON |
+| AI | Two LLMs (at least one OpenAI; ❓ which), structured JSON. The backtest winner runs live. |
 | Storage | Supabase (Postgres + realtime) |
 | Hosting | Backend on Railway (the leaderboard download is too slow for serverless); executor + dashboard on Vercel |
 | Frontend | Next.js + Tailwind |
@@ -227,7 +243,7 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 | **Before Tue 12:00** | **Handoff notes** (one member is away midday Tue): repo scaffold, Supabase schema, env vars, task split |
 | Tue 12–16 | DON access from the sponsor · fresh wallet + API wallet · move HYPE from HyperEVM to HyperCore (keep 0.1) and swap to USDC · spikes: `portfolio` pull, $10 IOC order, CRE cron + HTTP in simulation |
 | Tue 16–24 | `ingest` + `score` · kind labeling · start saving snapshots |
-| Wed 00–08 | **`backtest`** (return-based, 4 OOS windows, algo-only vs. algo + Claude) · `review` workflow (Claude in CRE) |
+| Wed 00–08 | **`backtest`** (return-based, 4 OOS windows, algo-only vs. model A vs. model B) · `review` workflow (agent in CRE) |
 | Wed 08–15 | `positions` API · `mirror` workflow · executor (signature check, dedupe, ledger) · end-to-end dry run with tiny size |
 | Wed 15–19 | Dashboard: funnel, backtest charts, ledger PnL, CRE log · HyperEVM consumer contract · **freeze the source set** |
 | **Wed 19:00** | **Go live** on mainnet |
@@ -256,23 +272,27 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 - [x] CRE: hourly `review` + 10-minute `mirror`. Mirror uses the backend snapshot plus a direct spot-check of ~10 sources. CRE decides, the executor signs; hash on HyperEVM.
 - [x] Capital: 5 HYPE → USDC on HyperCore spot (portfolio margin needs $10k)
 - [x] Prices: Hyperliquid oracle/mark prices via the Info API, not Chainlink oracles
-- [x] AI: Claude picks 5–25 sources from ~25 algo finalists, seeing metrics, equity curve, positions and trade patterns. Value is proven by an algo-only vs. algo + Claude backtest.
+- [x] AI: the agent picks 5–25 sources from ~25 algo finalists. It sees metrics, equity curve, positions, trade patterns, time in market and correlations, and judges diversification and flatness. Two models (≥ 1 OpenAI) are compared against algo-only in the backtest; the winner runs live.
 - [x] Backtest haircut: modeled from turnover. Type-B threshold is tier-dependent.
 - [x] Markets: validator perps + USDC-collateral HIP-3, every asset ≥ $20M OI. Orders: IOC limit with a slippage cap.
 - [x] Snapshot refreshed just before each CRE run · keep 0.1 HYPE on HyperEVM for gas
+- [x] Score = average percentile rank; filters ≥ $10k, ≥ 30 days active, ≥ 10 trades
+- [x] Weights renormalized over active (non-flat) sources · ledger = target, account = truth
+- [x] Executor sanity bounds (frozen set, notional cap) · Pause + Flatten buttons for any team member · Telegram alerts
+- [x] Backtest: one cutoff per OOS window, anonymized + truncated prompts · the losing model is shadow-tracked on paper after go-live
 - [x] pnpm monorepo, no license yet · fixtures + tiny mainnet testing · public read-only dashboard · video ≤ 3 min · keep running through judging
-- [x] Stack: TS, `@nktkas/hyperliquid`, Claude Sonnet 5.5, Supabase, Next.js + Tailwind, Railway + Vercel. NOWNodes optional; no AgentKit.
+- [x] Stack: TS, `@nktkas/hyperliquid`, two LLMs, Supabase, Next.js + Tailwind, Railway + Vercel. NOWNodes optional; no AgentKit.
 
 **Open**
 - [ ] ❓ Composite score weights
-- [ ] ❓ Tiering: purely algorithmic, or can Claude override?
+- [ ] ❓ Tiering: purely algorithmic, or can the agent override?
 - [ ] ❓ Balanced bucket's leverage scale or cap (after backtests); Conservative's cap
 - [ ] ❓ Per-tier type-B threshold N; type-A time limit and DCA spacing (production design)
 - [ ] ❓ Spot-check tolerance between the snapshot and direct reads (tune in the dry run)
-- [ ] ❓ Claude in CRE: every node + per-field consensus (suggested) vs. single cached call
-- [ ] ❓ Claude output format: weight grid, continuous weights, or ranking
+- [ ] ❓ Which two models (≥ 1 OpenAI)
+- [ ] ❓ LLM in CRE: every node + per-field consensus (suggested) vs. single cached call
+- [ ] ❓ Agent output format: weight grid, continuous weights, or ranking
 - [ ] ❓ AI workstream's first deliverables
-- [ ] ❓ Should the executor cross-check reports against its own copy of the bucket weights?
 
 ---
 
