@@ -1,235 +1,308 @@
-# HACKATHON — TOKEN2049 Origins
+# PerpParrot 🦜
 
-> **Working name: TBD** ❓ · Status: design draft, no code yet
+> Copy the best Hyperliquid perps traders and vaults, picked by quant screens and Claude, orchestrated by Chainlink CRE.
+>
+> **TOKEN2049 Origins Hackathon** · Tracks: **Chainlink (CRE)** · **AI x Crypto** · Status: design doc, no code yet
 
 **TL;DR**
-- A TypeScript backend scores ~47k Hyperliquid traders and ~80 serious vaults on risk-adjusted metrics.
-- A Chainlink CRE workflow runs every 10 min: Claude reviews the shortlist and curates a risk bucket, and CRE emits a DON-signed rebalance report, also logged on HyperEVM.
-- An executor verifies the report and trades a 5 HYPE portfolio on mainnet.
-- A dashboard shows the picks, the reasoning and live PnL.
+- Score Hyperliquid addresses (traders, HyperCore vaults, ERC-4626 vaults) on risk-adjusted performance.
+- Claude helps pick a set of **5–25 source wallets**.
+- Every 10 minutes, Chainlink CRE verifies their positions and emits a signed rebalance report.
+- An executor holds the **weighted, netted** copy of those positions in our own Hyperliquid account (5 HYPE, about $470).
+- **The backtest is the proof:** in-sample selection vs. out-of-sample results over 2 weeks, 1 month, 6 weeks and 3 months, compared with holding BTC. The ~5 h live run shows the machinery working.
 
-## 1. Vision
-Use AI + open onchain data to rank Hyperliquid perps traders and vaults by **risk-adjusted** returns, then run a live portfolio that copies the winners — with every pick explained on a public dashboard.
+---
 
-**Hackathon themes hit:** AI x Crypto · DeFi · Infrastructure (Chainlink CRE).
+# Part 1: Design
 
-**Non-goals (for the hackathon):** custody of other users' funds, a token, mobile app, HFT-grade latency, guaranteed returns.
+## 1. Scope
 
-**Demo in 3 minutes:**
-1. Leaderboard → ~14.5k "profitable" addresses → show how our risk-adjusted filters cut them to a short list (and why most fail).
-2. Click a finalist → metrics + Claude's rationale and red flags.
-3. Pick a risk bucket → show the live mainnet portfolio copying it, with the CRE rebalance log.
-4. Live PnL vs. benchmark since the start of the hackathon.
+**Build window:** 36 h, from **Tue 6 Oct 12:00 SGT** to **Thu 8 Oct 00:00 SGT**. Team of 3–4. The final demo is a **recorded video**.
 
-## 2. How it works (4 steps)
+**Live window:** go live at **~Wed 19:00 SGT**, so ~5 h and ~30 mirror runs before the deadline.
 
-| # | Step | Output |
-|---|------|--------|
-| 1 | **Collect** performance data for HL traders & vaults | Normalized trader/vault history in our DB |
-| 2 | **Score** — algorithmic screen, then LLM review | Ranked shortlist with reasons + red flags |
-| 3 | **Curate & execute** — AI builds risk buckets, we trade one live on mainnet | Live portfolio (small capital) |
-| 4 | **Show** analysis + live performance | Dashboard for demo |
+**In scope**
+- Score and select source wallets.
+- Backtest the selection.
+- Live mirror of one bucket on mainnet, orchestrated by CRE.
+- Dashboard.
 
-```
-  BACKEND (TypeScript)                      CHAINLINK CRE (every 10 min)              BACKEND
- ┌────────────────────────────┐            ┌──────────────────────────────┐        ┌───────────────┐
- │ HL leaderboard / Info API  │            │ fetch shortlist (consensus)  │ signed │ Executor      │
- │ HyperEVM vaults, HyperTrkr │──► DB ──►  │ Claude review + curate       │ report │ verify report │──► Hyperliquid
- │   ▼                        │ shortlist  │ target weights + drift check │───────►│ risk limits   │    (mainnet)
- │ Ingest ──► Quant screen    │   API      │ report() ──► HyperEVM log    │        │ sign + send   │
- └────────────────────────────┘            └──────────────────────────────┘        └───────┬───────┘
-                 │                                                                          │
-                 └──────────────────────────► DB ◄── fills / PnL ◄──────────────────────────┘
-                                               │
-                                          Dashboard
-```
+**Non-goals:**
+- managing other people's money
+- depositing into vaults
+- a token
+- mobile
+- HFT-grade latency
+- guaranteed returns
 
-## 3. Components
+**Video storyline (~3 min):**
+1. **Funnel:** ~14.5k "profitable" leaderboard addresses → our filters → the source set. Show why most fail.
+2. **Backtest:** OOS equity curves for 2 weeks, 1 month, 6 weeks and 3 months vs. holding BTC. *This is the value claim.*
+3. **Finalist drill-down:** metrics, Claude's rationale, red flags.
+4. **Live:** the CRE run log, HyperEVM decision hashes, executor fills, and per-source PnL attribution over the ~5 h live window.
 
-### 3.1 Data ingestion
-- **Sources:**
-  - **HL Info API (`POST /info`)**
-    - `portfolio`: account value and PnL history per window, i.e. the equity curve we score on.
-    - `userFillsByTime`, `clearinghouseState`, `userFunding`, `vaultDetails`.
-    - Fills: only the **10k most recent** per address are reachable; older fills are in the requester-pays S3 bucket `hl-mainnet-node-data`.
-  - **HyperEVM RPC.**
-  - **hyperliquidvaults.com**: ranks *HyperCore* vaults only.
-  - **[HyperTracker](https://hypertracker.io)**: paid API with a free tier of 100 tokens/day, then $179+/month. Backup/cross-check only.
-- **Rate limits:** 1200 weight/min per IP, and most info calls cost 20. That is **~60 history pulls/min**, so a few hundred shortlisted addresses refresh in minutes.
-- **Candidate universe:** leaderboard addresses + vaults.
-  - **Leaderboard data is available.** The [HL leaderboard](https://app.hyperliquid.xyz/leaderboard) UI was failing to load, but its backing file `GET https://stats-data.hyperliquid.xyz/Mainnet/leaderboard` returns 200. Checked 2026-10-06:
-    - **~40 MB JSON, 47,495 addresses**, taking 35 s to 2 min+ to download. The size likely explains the UI failure. It is a static file refreshed every few minutes.
-    - Each row has `ethAddress`, `accountValue`, `displayName`, and `pnl` / `roi` / `vlm` for `day` / `week` / `month` / `allTime`.
-    - About 14.5k addresses have ≥ $10k account value *and* positive month + all-time PnL. **Simple "is profitable" filters barely narrow the field; risk-adjusted scoring has to do the work.**
-    - Plan: pull it at most every few hours, cache it, and only pull Info API history for the pre-filtered top few hundred.
-  - ⚠️ The endpoint is **undocumented** and could change → keep cached snapshots; HyperTracker is the fallback.
-  - **HyperCore vaults:** `GET https://stats-data.hyperliquid.xyz/Mainnet/vaults` (~14 MB, ~11 s; also undocumented) lists 9,476 vaults with APR, PnL, TVL, leader and `isClosed`.
-    - Only **3,091 are open**, and just **234 / 82 / 26** have TVL ≥ $10k / $100k / $1M (checked 2026-10-06).
-    - The serious vault universe is small enough to score in full every run.
-    - The HL docs now call these vaults **legacy**: perps only, no spot/HIP-3, 10% leader profit share.
-    - Depositor lockup is **1 day** (4 days for HLP).
-  - **ERC-4626 vaults on HyperEVM** are what the HL team now recommends. Most of today's are **yield/lending** vaults (Felix on Morpho, Hyperbeat on Midas, Euler, HyperLend, …), not trader strategies.
-    - They can be listed via the [DefiLlama yields API](https://yields.llama.fi/pools) (chain "Hyperliquid L1"), the [tradingstrategy.ai ERC-4626 list](https://web3-ethereum-defi.tradingstrategy.ai/tutorials/erc-4626-vault-list), or by scanning `Deposit` event logs.
-    - DefiLlama shows **529 pools, 75 with ≥ $1M TVL** (2026-10-06).
-      - Mostly lending: Morpho 20, HyperLend 7.
-      - A handful are **strategy vaults** closer to "copy a trader": Liminal (basis), Harmonix, D2 Finance.
-    - ❓ *Are ERC-4626 yield vaults in scope (e.g. as the "Conservative" bucket's yield leg), or do we only copy perps strategies?*
-- Store raw + normalized snapshots so scoring is reproducible.
+## 2. Terminology
 
-### 3.2 Scoring (algo first, AI second)
-1. **Hard filters:** minimum history (e.g. ≥30 days), min trade count, min account value, max leverage, max drawdown cap.
-2. **Baseline ranking:** the same style of metrics the HL leaderboard ranks by (account value, PnL, ROI, volume over 1D / 7D / 30D / all-time windows), so our rankings are familiar and easy to check against.
-3. **Risk-adjusted metrics:** Sharpe, Sortino, Calmar, max drawdown, win rate, PnL consistency (not one lucky trade), exposure/leverage profile.
-   - Compute these from `portfolio` **PnL history**, not raw account value, so deposits and withdrawals don't look like returns.
-   - ⚠️ `portfolio` is coarse: about **~100 points per window**, checked 2026-10-06. That is roughly daily for `month` and **roughly weekly for `allTime`** (and sparser for `perpAllTime`).
-     - 30-day daily Sharpe/Sortino is fine.
-     - Longer horizons are weekly-resolution only, unless we rebuild the curve from `userFillsByTime` + `userFunding` (capped at the 10k most recent fills).
-4. **LLM reviewer (Claude):** reads the stats and trade patterns of the **top ~20 finalists** (to fit CRE's 25 KB consensus limit). It flags red flags (martingale, wash-like behavior, single-asset concentration) and writes a plain-English rationale for each pick.
-
-**Backtest caveat:** the leaderboard is only a *current* snapshot. Any address we backtest is by definition a survivor, so backtests will look too good. Mitigations:
-- Rank on an earlier window and evaluate on a later one (e.g. rank on days −60…−30, evaluate on −30…0; weekly points from `allTime`).
-- Start saving our own snapshots now, which gives an honest forward test by demo time.
-
-❓ *Exact weights/thresholds — to be tuned on the split above.*
-
-### 3.3 Portfolio curation (AI agent)
-- Agent assembles **risk buckets** from the scored shortlist, e.g. **Conservative / Balanced / Aggressive**, each with target allocations.
-- **MVP — static buckets:** agent publishes the buckets with rationale; the user picks one. We trade one bucket live.
-- **Stretch — conversational onboarding:** agent asks the user a few questions (risk tolerance, horizon, drawdown comfort) and places them in a bucket.
-
-### 3.4 Execution (Hyperliquid mainnet, small capital)
-- Copy targets: **vaults (deposit) and/or individual traders (mirror positions, scaled)**. ❓ *Vaults, traders, or both?*
-  - **Vaults:** small universe (~80 with ≥ $100k TVL), one deposit per target, but a 1-day lockup.
-  - **Traders:** ~47k addresses and more novel, but scaled-down mirroring hits the $10 minimum.
-- Use a Hyperliquid **API/agent wallet** to limit blast radius. It signs orders and other L1 actions, but withdrawals and transfers need the master wallet.
-  - ❓ *Can the agent wallet sign `vaultTransfer` (vault deposits)? It is an L1 action, so probably yes, but this is undocumented → spike.*
-- **Risk controls:** per-target allocation cap, max portfolio leverage, max slippage, global kill switch, executor dedupe by report ID.
-- **Starting capital: 5 HYPE** (≈ $470 at the HYPE mid of ~$94 on 2026-10-06).
-  - **Collateral:** standard perps margin is USDC. Portfolio margin, which would let HYPE back positions, needs > $10k account value, so it is out of reach. **Recommended:** sell HYPE → USDC on spot pair `@107` (HYPE/USDC) at start. ❓ *Confirm, or keep HYPE exposure on purpose?*
-  - **Minimums:** the HL minimum order is **$10**, so ≈ $470 supports roughly **5–8 targets** with room to rebalance.
-    - Mirroring a trader means scaling their positions down to our allocation, and legs under $10 get skipped. So mirror only each trader's **largest positions**.
-    - Vault deposit minimum not yet verified ❓.
-  - ❓ *Who funds the wallet?*
-
-### 3.5 Orchestration (Chainlink CRE)
-CRE runs the **10-minute decision loop**. Heavy data work happens off-CRE, because of CRE's quotas.
-
-**Decision: CRE decides, the executor signs.** CRE produces a DON-signed rebalance report. A small executor service checks the signatures, applies risk limits, and signs/sends the Hyperliquid orders with the API wallet key.
-- *Why not sign inside CRE?* A deployed workflow decrypts secrets into every node's memory. Single-send POSTs (`cacheSettings`) are only best effort, so duplicate orders are possible. Chainlink's own portfolio-rebalancing template uses the same decide/execute split.
-
-**Loop (cron `0 */10 * * * *`):**
-1. Fetch the compact top-N candidate file from our backend, using HTTP GET with identical-result consensus.
-2. Call Claude with structured JSON output and field-level consensus. Free-text output would fail consensus.
-3. Compute target weights and the drift vs. current positions. Trade only if drift is above a threshold.
-4. `runtime.report()` → POST to the executor, **and** write the decision hash to a consumer contract on **HyperEVM**. HyperEVM is a supported CRE chain, and this gives an onchain, auditable decision log.
-
-**CRE limits that shape the design** ([quotas](https://docs.chain.link/cre/service-quotas)):
-
-| Limit | Value |
+| Term | Meaning |
 |---|---|
-| Run time | 5 min |
-| HTTP calls | 15 per run |
-| Response size | **250 KB** |
-| Data into consensus | 25 KB |
-| Memory | 100 MB |
+| **Source wallet** | An address we copy: a trader, a HyperCore vault, or the HyperCore account behind an ERC-4626 vault. We copy **5–25** of them. |
+| **Slice** | Our scaled copy of one source's position in one asset. Kept in a **virtual ledger** per (source, asset). |
+| **Position** | Our actual **net** per-asset holding on Hyperliquid, which is the sum of all slices for that asset. **Positions are the bottleneck**: ~5–10 net positions above the $10 minimum with ≈ $470. |
+| **Bucket** | A risk tier: a weighted source set plus a leverage policy. |
 
-The full HL leaderboard is ~40 MB, so ingestion and scoring **must** run in our backend. CRE only consumes a pre-scored shortlist.
+## 3. How it works
 
-**Runtime notes:** workflows are TypeScript (`@chainlink/cre-sdk`) running on QuickJS/WASM, so there is no `node:crypto` (use Noble/viem). Develop with `cre workflow simulate`. Deploying to a live DON needs **Early Access approval** (`cre account access`).
-- ❓ *Request Early Access now. If it doesn't arrive in time, demo the workflow in simulation mode with `--broadcast` and run the same loop live from the backend.*
+```
+ BACKEND (Railway)                    CRE: review (hourly)            CRE: mirror (every 10 min)         EXECUTOR (serverless)
+┌──────────────────────────┐ shortlist ┌───────────────────────┐ notes ┌─────────────────────────────┐ signed ┌──────────────────────┐
+│ leaderboard + vault list │──────────►│ Claude (Sonnet 5.5)   │──────►│ fetch positions snapshot (1)│ report │ verify DON signature │
+│ ingest → label → score   │           │ monitor sources, flag │       │ spot-check ~10 sources (HL) │───────►│ dedupe report ID     │──► Hyperliquid
+│ backtest · ledger        │ positions │ risks, write rationale│       │ slices → net → diff vs. ours│        │ sign w/ API wallet   │    (our account)
+│ positions snapshot API   │──────────►└───────────────────────┘       │ report() → executor+HyperEVM│        └──────────┬───────────┘
+└────────────┬─────────────┘                                           └─────────────────────────────┘                   │
+             └───────────────────────────────► Supabase ◄──────────── fills / PnL / ledger ◄─────────────────────────────┘
+                                                  │
+                                        Dashboard (Next.js on Vercel)
+```
 
-### 3.6 Dashboard
-- Leaderboard of scored traders/vaults with metrics + LLM rationale.
-- Risk buckets and their composition.
-- Live portfolio: positions, PnL vs. benchmark (e.g. hold BTC / HLP), rebalance log.
-- ❓ *Frontend stack (Next.js suggested).*
+## 4. Components
 
-### 3.7 Module contracts
-Each module reads the previous module's output from the DB, so modules can be built and tested independently against fixture data.
+### 4.1 Ingest (backend)
+- **Universe:**
+  - the leaderboard file (~47.5k addresses)
+  - the HyperCore vault list (~3.1k open)
+  - keep only those with ≥ **$10k** account value / TVL
+- **Label each address's kind:**
+  - HyperCore vault if it's in the vault list.
+  - **ERC-4626 vault** if `eth_getCode` on HyperEVM returns code *and* `asset()` / `totalAssets()` succeed. This runs on the shortlist only.
+  - Trader otherwise.
+- **History:** `portfolio` PnL history for the pre-filtered top few hundred. `clearinghouseState` for current positions.
+- Cache the leaderboard every few hours and save every snapshot.
 
-| Module | Input | Output (stored) |
-|--------|-------|-----------------|
-| `ingest` | HL APIs, vault lists | `Snapshot`: address, kind (trader / HyperCore vault / ERC-4626 vault), account value, PnL/ROI/volume per window, equity curve, fills |
-| `score` | Snapshots | `Candidate`: passed filters?, metrics, composite score |
-| `review` | Top-N candidates | `Review`: keep/drop, red flags, rationale (Claude, structured JSON) |
-| `curate` | Kept candidates | `Bucket`: risk level, target weights per address |
-| `execute` | Selected bucket + current positions | `RebalanceLog`: intended vs. filled orders, fees, errors |
-| `dashboard` | All of the above | — |
+### 4.2 Score (backend)
+1. **Hard filters:**
+   - ≥ $10k account value / TVL
+   - ≥ 30 days of history
+   - a minimum trade count
+   - not closed
+2. **Metrics:** computed from PnL history, not account value, so deposits and withdrawals don't count as returns.
+   - Sharpe, Sortino, Calmar
+   - max drawdown
+   - PnL consistency
+   - realized volatility
+   - average leverage
+3. **Composite score → finalists.** ❓ *Weights.*
 
-## 4. Stack
-- **Language:** TypeScript everywhere.
-- **Hyperliquid:** [`@nktkas/hyperliquid`](https://github.com/nktkas/hyperliquid). There is no official TS SDK; this one is listed in the HL docs and actively maintained. *(Inside CRE, use raw HTTP; the SDK is for the backend/executor.)*
-- **Orchestration:** Chainlink Runtime Environment, `@chainlink/cre-sdk` (TS on QuickJS/WASM), `cre` CLI.
-- **Onchain log:** small consumer contract on HyperEVM that receives CRE reports.
-- **AI:** Claude API (Anthropic TS SDK) for the reviewer and the bucket curator.
-- **Storage:** ❓ *Leaning **Supabase (hosted Postgres)**: the backend, executor and dashboard all need the same DB from different machines, and its realtime feed makes live PnL easy. SQLite only if everything runs on one box.*
-- **Coinbase AgentKit:** ❓ *Open, leaning skip.* It has **no Hyperliquid action provider**; its TS providers as of 2026-10-06 include `vaultsfyi`, `morpho`, `defillama`, `across`, `erc20`, `x402`, …
-  - It's only worth it if we include ERC-4626 vaults: `vaultsfyi` / `defillama` could feed vault discovery to the curator agent.
-  - ❓ *Does vaults.fyi cover HyperEVM?*
+### 4.3 Buckets (risk tiers)
+- Finalists are tiered by **realized volatility + average leverage**.
+- **Aggressive (live):** the source set with leverage mirrored exactly, no cap.
+- **Balanced:** the **same source set as Aggressive**, with leverage scaled down or capped. ❓ *Scale factor or cap.*
+- **Conservative:** the low-vol / low-leverage tier, with leverage capped.
+- **Claude** assigns weights within each tier and writes the rationale.
 
-## 5. Working rules
-- Small, independently tested modules; integrate only tested pieces.
-- Budget **~1h testing/bugfix per 2h of feature work**.
-- Fallback for every live dependency (cached data for the demo if an API flakes).
+### 4.4 Copy model: virtual ledger
+- **Slice** for source `i`, asset `c`: `slice_i,c = wᵢ × (nᵢ,c / Eᵢ) × E_ours`.
+  - `nᵢ,c` is the source's signed notional in asset `c`.
+  - `Eᵢ` is the source's **current** equity, and `E_ours` is ours. Scaling by current equity means we copy the source's exposure ratio, so its deposits and withdrawals don't distort our size.
+- **Position** in asset `c` = `Σᵢ slice_i,c`, netted only at order time.
+- **Trade a leg only if** the gap between the target and our position is **≥ $10 and ≥ 10%** of the target.
+- The ledger is stored in Supabase. It enables per-source PnL attribution and clean removals (§4.5).
 
-## 6. Milestones
-0. **First thing:**
-   - request CRE Early Access (`cre account access`), since approval takes time
-   - fund the wallet and swap HYPE → USDC
-   - cache a leaderboard snapshot
-1. **Spikes:**
-   - `portfolio` history pull for 1 address and 1 vault
-   - CRE cron + HTTP GET in `cre workflow simulate`
-   - $10 HL order from the API wallet
-   - `vaultTransfer` from the API wallet
-   - CRE report → executor signature check
-2. **MVP pipeline:** ingest → quant score → ranked list in DB.
-3. **AI layer:** LLM reviewer + bucket curator.
-4. **Live:** execution on mainnet with risk caps; dashboard shows live PnL.
-5. **Stretch:** conversational bucket onboarding, position mirroring, onchain score attestation.
+### 4.5 Source-set changes
+**Hackathon: the set is fully frozen at go-live (~Wed 19:00 SGT).** No reselection and no ejections. The hourly Claude run monitors and comments only.
 
-❓ *Map milestones to actual hackathon hours once the schedule is confirmed.*
+**Production design** (reselection daily or weekly). Removals come in two distinct types:
+
+| Type | Cause | Handling |
+|---|---|---|
+| **A: edged out** | A better performer takes the spot | Recompute targets with the new mix. Legs left **misaligned with the new allocation become reduce-only**: we follow only the old source's reductions and closes, so it stays the reference and nothing is orphaned. After a time limit, **DCA out in 2–3 trades over a few hours**. |
+| **B: performed badly** | The source's **own account drawdown ≥ N%** from peak, measured on PnL history (not deposits/withdrawals) | **Immediate exit** of its slices on the next run, netted against the other slices. |
+
+❓ *What are N, the type-A time limit, and the DCA spacing?*
+
+### 4.6 Review (CRE workflow, hourly)
+- Fetch the finalist and source stats (1 HTTP GET with identical-result consensus).
+- Call **Claude Sonnet 5.5** (`claude-sonnet-5-5`) with structured JSON output. It returns:
+  - rationale and red flags (martingale, wash-like behavior, concentration, near-liquidation)
+  - bucket weights before go-live
+- Field-level consensus → `report()` → Supabase.
+- After go-live it is **monitoring only**; it never changes the frozen set.
+
+### 4.7 Mirror (CRE workflow, every 10 min, cron `0 */10 * * * *`)
+1. Fetch the backend's **positions snapshot** for all sources (1 call; the shortlist may hold up to 25 sources).
+2. **Spot-check:** re-read `clearinghouseState` directly from Hyperliquid for ~10 random sources plus our own account. If they disagree beyond a tolerance, reject the run. ❓ *Tolerance, since positions can move between reads.*
+3. Slices → net positions → diff against our account, applying the drift rule from §4.4.
+4. `report()` → POST to the executor, plus the report hash to a HyperEVM consumer contract.
+
+That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
+
+### 4.8 Execute (serverless executor)
+- Verify the DON signature, dedupe by report ID, and send IOC orders with a slippage limit.
+- **Keys:** a fresh EOA. A human holds the master key; the executor holds only an **HL API wallet** key (trade, no withdraw).
+- **Leverage:** mirrored exactly (Aggressive). Set via `updateLeverage`, cross margin.
+- **Kill switch:** manual only (a Supabase flag).
+- **Capital:** 5 HYPE, **swapped to USDC on HyperCore spot** (`@107`) to margin perps. Portfolio margin, which would let HYPE back positions, needs a $10k balance, and we have just under $500.
+
+### 4.9 Backtest (backend): the main value claim
+- **Return-based:**
+  - Portfolio return ≈ `Σ wᵢ · rᵢ` of the sources' PnL-history returns.
+  - Subtract a fee and slippage haircut.
+  - This follows from §4.4: equity-ratio scaling makes our return a weighted sum of source returns.
+- **In-sample** is all of an address's history **before** the cut. **Out-of-sample** windows are the **last 2 weeks, 1 month, 6 weeks, and 3 months**.
+- Report each window against holding BTC.
+- **Data resolution:** OOS windows within the last 30 days have ≈ daily points (`month` window). The 6-week and 3-month windows only have ≈ weekly points (`allTime`).
+- **Caveat:** the leaderboard is a *current* snapshot, so every address is a survivor and the backtest flatters us. State this in the video.
+- *Stretch:* position replay from fills (≤ 10k most recent per address), simulating the 10-minute loop, the $10 minimum and netting.
+
+### 4.10 Dashboard (Next.js + Tailwind on Vercel, Supabase realtime)
+- the funnel
+- backtest charts for each OOS window vs. BTC
+- finalist drill-down with Claude's rationale
+- buckets
+- live net positions vs. targets
+- **per-source PnL from the ledger**
+- the CRE run log with HyperEVM hashes
+
+### 4.11 Module contracts
+| Module | Input | Output (Supabase / API) |
+|---|---|---|
+| `ingest` | leaderboard, vault list, HL Info API, HyperEVM RPC | `snapshots` (kind, equity, PnL history, positions) |
+| `score` | `snapshots` | `candidates` (filters, metrics, score, tier) |
+| `backtest` | `snapshots`, `candidates` | `backtests` (per OOS window: curve, stats, vs. BTC) |
+| `review` (CRE) | candidates | `reviews`, `buckets` |
+| `positions` | source set | positions snapshot API |
+| `mirror` (CRE) | positions snapshot + spot-checks + `ledger` | signed report + HyperEVM hash |
+| `execute` | report | `orders`, `fills`, updated `ledger` |
+| `dashboard` | all of the above | — |
+
+## 5. Stack
+| Layer | Choice |
+|---|---|
+| Language | TypeScript everywhere |
+| Hyperliquid | [`@nktkas/hyperliquid`](https://github.com/nktkas/hyperliquid) in the backend and executor; raw HTTP inside CRE |
+| Orchestration | Chainlink CRE, `@chainlink/cre-sdk` + `cre` CLI, with DON access from the sponsor on-site |
+| Onchain log | CRE consumer contract on HyperEVM |
+| Prices | **Hyperliquid's own oracle/mark prices** via the Info API (`metaAndAssetCtxs` → `oraclePx` / `markPx`). BTC benchmark history comes from `candleSnapshot`. We don't use Chainlink Data Feeds. |
+| AI | Claude API, `claude-sonnet-5-5`, structured JSON |
+| Storage | Supabase (Postgres + realtime) |
+| Hosting | Backend on Railway (the leaderboard download is too slow for serverless); executor + dashboard on Vercel |
+| Frontend | Next.js + Tailwind |
+| Optional infra | **NOWNodes** (`hype.nownodes.io`): HyperEVM RPC + an Info API copy that includes `clearinghouseState`. Use it if it helps with rate limits. **Not a target track.** |
+| Not used | Coinbase AgentKit |
+
+## 6. Timeline (all times SGT)
+Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules.
+
+| When | Milestone |
+|---|---|
+| **Before Tue 12:00** | **Handoff notes** (one member is away midday Tue): repo scaffold, Supabase schema, env vars, task split |
+| Tue 12–16 | DON access from the sponsor · fresh wallet + API wallet, swap HYPE → USDC · spikes: `portfolio` pull, $10 order, CRE cron + HTTP in simulation |
+| Tue 16–24 | `ingest` + `score` · kind labeling · start saving snapshots |
+| Wed 00–08 | **`backtest`** (return-based, 4 OOS windows) · `review` workflow (Claude) |
+| Wed 08–15 | `positions` API · `mirror` workflow · executor (signature check, dedupe, ledger) · end-to-end dry run with tiny size |
+| Wed 15–19 | Dashboard: funnel, backtest charts, ledger PnL, CRE log · HyperEVM consumer contract · **freeze the source set** |
+| **Wed 19:00** | **Go live** on mainnet |
+| Wed 19–Thu 00 | Monitor, record the video, submit |
 
 ## 7. Risks
-- **Survivorship / overfitting:** past winners ≠ future winners → use out-of-sample backtest window.
-- **Copy latency & slippage** when mirroring traders.
-- **Key security** on mainnet → agent wallet, small capital, kill switch.
-- **CRE Early Access may not arrive in time** → simulation mode for the demo; the same loop runs live from the backend.
-- **CRE quotas** (250 KB responses, 15 HTTP calls, 25 KB consensus) → keep the shortlist CRE sees small (top ~20).
-- **Duplicate/replayed orders** → the executor dedupes by report ID; HL also rejects reused nonces.
-- **API rate limits** on HL Info API → fetch history only for the pre-filtered shortlist; cache aggressively.
-- **Data source availability:** the leaderboard file is undocumented and slow (~40 MB) → cached snapshots + HyperTracker fallback.
-- **Tiny capital:** ≈ $470 against the $10 minimum order limits us to ~5–8 targets, and fees are a large share of PnL → trade only past a drift threshold.
-- **Legacy-vault dependence:** HyperCore vaults are marked legacy; the vaults endpoint is undocumented.
+- **Backtest survivorship** → stated openly; our own snapshots start a forward record.
+- **Short live window (~5 h)** → the value claim rests on the backtest; live only proves the mechanism.
+- **No leverage cap and no automatic halt (Aggressive)** → liquidation is possible. *Accepted:* small capital, manual kill switch, monitored throughout.
+- **$10 minimum vs. ≈ $470** → only ~5–10 net positions are possible; small legs get skipped. Show tracking error.
+- **Copy lag (≤ 10 min) and slippage** → IOC orders, slippage limit, drift rule.
+- **Snapshot vs. spot-check mismatch** from positions moving between reads → tolerance and timestamps.
+- **Undocumented data endpoints** → cached snapshots; HyperTracker/NOWNodes as fallbacks.
+- **Duplicate orders** → report-ID dedupe plus HL nonces.
 
-## 8. Decisions & open questions (summary)
+## 8. Decisions & open questions
 
 **Decided**
-- [x] Network: HL mainnet, starting capital 5 HYPE
-- [x] Orchestration: CRE runs the 10-minute decision loop; ingestion + scoring run in the backend (CRE quotas)
-- [x] Signing: CRE emits a signed report → executor verifies and signs HL orders; decision hash logged on HyperEVM
-- [x] Leaderboard data: `stats-data.hyperliquid.xyz/Mainnet/leaderboard` works (~40 MB, ~47.5k addresses)
-- [x] AI: quant screen first → Claude reviewer + bucket curator
-- [x] Curation UX: static buckets for MVP, conversational onboarding as stretch
-- [x] Sourcing: leaderboard + vaults, HL-leaderboard-style metrics, HyperTracker as fallback
-- [x] HL SDK: `@nktkas/hyperliquid` (backend/executor); raw HTTP inside CRE
+- [x] Name **PerpParrot** · tracks: Chainlink + AI x Crypto · recorded video · go live ~Wed 19:00 SGT
+- [x] Copy model: mirror positions of **5–25 source wallets** in our own account. Per-(source, asset) virtual ledger, scaled by current equity, netted at order time. Positions (~5–10) are the bottleneck.
+- [x] Drift rule: trade a leg only if the gap is ≥ $10 and ≥ 10%
+- [x] Buckets tiered by vol + leverage. Balanced = the Aggressive set at lower leverage. **Aggressive is live**, leverage mirrored exactly, manual kill switch.
+- [x] Source set **fully frozen** during the hackathon. Production: type A (edged out) → reduce-only, then a DCA exit; type B (own drawdown ≥ N%) → immediate exit.
+- [x] Backtest: return-based; IS = all history before the cut; OOS = 2 wk / 1 mo / 6 wk / 3 mo vs. BTC. Position replay is a stretch goal.
+- [x] CRE: hourly `review` + 10-minute `mirror`. Mirror uses the backend snapshot plus a direct spot-check of ~10 sources. CRE decides, the executor signs; hash on HyperEVM.
+- [x] Capital: 5 HYPE → USDC on HyperCore spot (portfolio margin needs $10k)
+- [x] Prices: Hyperliquid oracle/mark prices via the Info API, not Chainlink oracles
+- [x] Stack: TS, `@nktkas/hyperliquid`, Claude Sonnet 5.5, Supabase, Next.js + Tailwind, Railway + Vercel. NOWNodes optional; no AgentKit.
 
 **Open**
-- [ ] ❓ Project name
-- [ ] ❓ CRE Early Access granted in time? (else simulation demo)
-- [ ] ❓ HyperTracker API access/terms (fallback data; paid, free tier 100 tokens/day)
-- [ ] ❓ ERC-4626 yield vaults in scope? (they list via DefiLlama; most are lending/yield, not trading)
-- [ ] ❓ Can the API wallet sign `vaultTransfer`? Vault deposit minimum?
-- [ ] ❓ Copy vaults, traders, or both
-- [ ] ❓ Confirm HYPE → USDC swap at start (recommended); who funds the wallet
-- [ ] ❓ Storage (leaning Supabase)
-- [ ] ❓ AgentKit in or out (no HL support; only useful for ERC-4626 vault discovery; does vaults.fyi cover HyperEVM?)
-- [ ] ❓ Frontend stack
-- [ ] ❓ Scoring weights/thresholds
-- [ ] ❓ Milestone → hackathon-hours mapping
+- [ ] ❓ Composite score weights
+- [ ] ❓ Balanced bucket's leverage scale or cap; Conservative's cap
+- [ ] ❓ Type-B drawdown threshold N; type-A time limit and DCA spacing (production design)
+- [ ] ❓ Spot-check tolerance between the snapshot and direct reads
+- [ ] ❓ Fee/slippage haircut assumed in the backtest
+- [ ] ❓ Should the executor cross-check reports against its own copy of the bucket weights?
 
-## 9. References
-- HL API: [info endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint) · [rate limits](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits) · [nonces & API wallets](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets) · [vaults](https://hyperliquid.gitbook.io/hyperliquid-docs/hypercore/vaults) · [portfolio margin](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/portfolio-margin)
+---
+
+
+# Part 2: Research notes (checked 2026-10-06)
+
+### Hyperliquid data
+- **Leaderboard:** `GET https://stats-data.hyperliquid.xyz/Mainnet/leaderboard`. Undocumented static file, refreshed every few minutes.
+  - **~40 MB, 47,495 rows.** Downloads take 35 s to 2 min+, which is probably why the [UI](https://app.hyperliquid.xyz/leaderboard) fails to load.
+  - Each row has `ethAddress`, `accountValue`, `displayName`, and `pnl` / `roi` / `vlm` for `day` / `week` / `month` / `allTime`.
+  - 20.9k rows have ≥ $10k account value. 14.5k have ≥ $10k *and* positive month + all-time PnL.
+- **Vault list:** `GET https://stats-data.hyperliquid.xyz/Mainnet/vaults` (~14 MB, ~11 s, undocumented).
+  - 9,476 vaults, 3,091 open. **234 / 82 / 26** open vaults have TVL ≥ $10k / $100k / $1M.
+  - The HL docs call HyperCore vaults **legacy** (perps only, no spot/HIP-3, 10% leader profit share, 1-day depositor lockup).
+- **Info API** (`POST https://api.hyperliquid.xyz/info`):
+  - `portfolio`: account value + PnL history for `day` / `week` / `month` / `allTime` (+ `perp*` versions).
+    - Only **~100 points per window**: ≈ daily for `month`, ≈ weekly for `allTime`.
+  - `clearinghouseState` gives positions. `userFillsByTime` gives fills; only the 10k most recent are reachable, and older fills are in the requester-pays S3 bucket `hl-mainnet-node-data`. Also `userFunding` and `vaultDetails`.
+- **Rate limits:** 1200 weight/min per IP. Most info calls cost 20; `clearinghouseState` / `allMids` cost 2.
+- **HyperTracker** (CoinMarketMan): paid API with a free tier of 100 tokens/day, then $179–$1,999/month.
+
+### Hyperliquid execution
+- The minimum order is **$10**.
+- API (agent) wallets sign orders and other L1 actions. Withdrawals and transfers need the master wallet.
+- **Collateral:** standard perps margin is USDC.
+  - HIP-3 markets can use other quote assets.
+  - Portfolio margin (HYPE at LTV 0.65) needs > $10k account value or > $5M volume.
+  - HYPE/USDC spot is `@107` (order asset id 10107).
+- There is no official TS SDK. `@nktkas/hyperliquid` is the best-maintained community SDK and is listed in the HL docs.
+
+### ERC-4626 vaults on HyperEVM
+- This is the approach the HL team recommends now. Most of these vaults are lending/yield vaults (Felix/Morpho, Hyperbeat/Midas, Euler, HyperLend). A few are strategy vaults (Liminal basis, Harmonix, D2 Finance).
+- DefiLlama yields API (chain "Hyperliquid L1"): 529 pools, 75 with ≥ $1M TVL.
+- When a vault trades on HyperCore via CoreWriter, its HyperCore account shares the contract's address, so on the leaderboard it **looks like a normal address**. Hence the `eth_getCode` check.
+
+### Chainlink CRE
+- **SDK:** TypeScript SDK `@chainlink/cre-sdk` (v1.x), Go also supported. Not formally GA yet. Workflows run on QuickJS/WASM, so there is no `node:crypto` (use Noble/viem).
+- **Cron:** 5- or 6-field expressions, minimum interval 30 s.
+- **Quotas per run:**
+
+  | Limit | Value |
+  |---|---|
+  | Run time | 5 min |
+  | Memory | 100 MB |
+  | HTTP calls | 15 |
+  | Response size | 250 KB |
+  | Request size | 120 KB |
+  | Data into consensus | 25 KB |
+  | Secret fetches | 5 |
+
+- **HTTP:** every node sends every request by default. `cacheSettings` makes a POST single-send, but only best effort.
+  - GET results are aggregated with identical, median, or per-field consensus.
+- **LLM output** has to be structured JSON, with consensus run per field.
+- **Secrets** are decrypted into every node's memory. That's why signing happens in the executor, not in CRE. Chainlink's portfolio-rebalancing template uses the same split.
+- **Writes:** ~24 EVM chains, **including HyperEVM** (TS SDK v1.4.0+). Reports go through a forwarder to a consumer contract, max 50 KB.
+
+### NOWNodes (optional infra)
+- `hype.nownodes.io` has two parts:
+  - **HyperEVM JSON-RPC:** `eth_getCode`, `eth_call`, `eth_getLogs`, `eth_sendRawTransaction`, …
+  - **A copy of HL's Info API:** `clearinghouseState`, spot state, vault summaries, user vault equities, `webData2`, …
+- Missing from the Info API copy: `portfolio`, fill history, `userFunding`. No `/exchange`, so orders go to HL directly.
+- Paid plans advertise unlimited requests per second. It needs an API key. [Docs](https://docs.nownodes.io/hype)
+
+### Coinbase AgentKit
+- No Hyperliquid action provider. Its TS providers include `vaultsfyi`, `morpho`, `defillama`, `across`, `erc20`, `x402`. Not used.
+
+### References
+- HL: [info endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint) · [rate limits](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits) · [nonces & API wallets](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets) · [vaults](https://hyperliquid.gitbook.io/hyperliquid-docs/hypercore/vaults) · [portfolio margin](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/portfolio-margin)
 - CRE: [service quotas](https://docs.chain.link/cre/service-quotas) · [HTTP client (TS)](https://docs.chain.link/cre/reference/sdk/http-client-ts) · [non-determinism](https://docs.chain.link/cre/concepts/non-determinism-ts) · [supported networks](https://docs.chain.link/cre/supported-networks-ts) · [deploy access](https://docs.chain.link/cre/account/deploy-access) · [portfolio-rebalancing template](https://docs.chain.link/cre-templates/automated-portfolio-rebalancing)
-- Data: [HL leaderboard](https://app.hyperliquid.xyz/leaderboard) · [hyperliquidvaults.com](https://hyperliquidvaults.com) · [HyperTracker](https://hypertracker.io) · [DefiLlama yields](https://yields.llama.fi/pools)
+- Data: [HL leaderboard](https://app.hyperliquid.xyz/leaderboard) · [hyperliquidvaults.com](https://hyperliquidvaults.com) · [HyperTracker](https://hypertracker.io) · [DefiLlama yields](https://yields.llama.fi/pools) · [tradingstrategy.ai ERC-4626 list](https://web3-ethereum-defi.tradingstrategy.ai/tutorials/erc-4626-vault-list)
 - SDKs: [`@nktkas/hyperliquid`](https://github.com/nktkas/hyperliquid) · [Coinbase AgentKit](https://github.com/coinbase/agentkit)
