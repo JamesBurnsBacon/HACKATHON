@@ -29,7 +29,7 @@
 
 **Non-goals:**
 - managing other people's money
-- depositing into vaults
+- depositing into vaults (Conservative's lending legs are paper-only during the hackathon)
 - a token
 - mobile
 - HFT-grade latency
@@ -94,11 +94,14 @@
 3. **Composite score = average percentile rank** across metrics (Sortino, Calmar, consistency, −max drawdown, …). This is robust to outliers and needs no scale tuning. **Top ~25 → finalists** for the agent (§4.6).
 
 ### 4.3 Buckets (risk tiers)
-- Finalists are tiered by **realized volatility + average leverage**. ❓ *Is tiering purely algorithmic, or can the agent override a tier with a justification?*
-- **Aggressive (live):** the source set with exposure mirrored exactly. There's no leverage cap beyond the 95% margin feasibility rule (§4.8).
-- **Balanced:** the **same source set as Aggressive**, with leverage scaled down or capped. ❓ *How: e.g. ×0.5 exposure or a portfolio leverage cap? Decide after the backtests.*
-- **Conservative:** the low-vol / low-leverage tier, with leverage capped.
-- **The agent** assigns weights within each tier and writes the rationale.
+| Bucket | Source universe | Exposure | Hackathon mode |
+|---|---|---|---|
+| **Aggressive** | Traders + vaults (HyperCore and ERC-4626) | Mirrored exactly, limited only by the 95% margin rule (§4.8) | **Live** |
+| **Balanced** | **Identical source set to Aggressive** | Aggressive × a leverage multiplier `m < 1`, **tuned from the backtest** to hit a target vol/drawdown | **Backtest + paper-tracked** |
+| **Conservative** | **A separate, lower-risk universe: vaults + lending only**, no individual traders | We **copy the sources' lending/yield positions** with the same ledger model, alongside their perp positions | **Backtest + paper-tracked** |
+
+- The agent picks and weights sources within each universe and writes the rationale.
+- ❓ *How do we read sources' lending positions? Current state via the HyperCore borrow/lend user-state Info call and EVM lending-vault balances; history for the backtest is unclear.*
 
 ### 4.4 Copy model: virtual ledger
 - **Slice** for source `i`, asset `c`: `slice_i,c = wᵢ × (nᵢ,c / Eᵢ) × E_ours`.
@@ -146,7 +149,7 @@ This is a dedicated workstream, integrated into the CRE flow.
 - **Models:** **two models are compared in the backtest; at least one is from OpenAI.** ❓ *Which two (e.g. Claude Sonnet 5.5 vs. an OpenAI model)?* **The backtest winner drives the live set.**
   - Structured JSON output.
   - API keys are CRE secrets, which is acceptable since every node can read them.
-- **Consensus:** ❓ *Open. Suggested: **every DON node calls the model** and we run **per-field consensus**. That's truly decentralized AI, at N× the API calls per run. The alternative is a single call via `cacheSettings`.*
+- **Consensus:** **Default: every DON node calls the model**, with **per-field consensus** (❓ still open). That's truly decentralized AI, at N× the API calls per run. The alternative is a single call via `cacheSettings`.*
 - **Output format:** ❓ *Open. Options:*
   - *a discrete weight grid (e.g. 0–3 units), which works well with identical-result consensus*
   - *continuous weights with median consensus*
@@ -154,11 +157,8 @@ This is a dedicated workstream, integrated into the CRE flow.
 - **Logging:** every run's full prompt and output are stored in Supabase with their hashes, for reproducibility and so the dashboard can show exactly what the model saw and said.
 - **Proving value:** the backtest compares **algo-only top-N vs. algo + model A vs. algo + model B** (§4.9).
 - **Live shadow:** after go-live, the losing model's picks are tracked **on paper** (no orders), so the video can show both side by side.
-- ❓ *AI workstream's first deliverables, so others can build in parallel. Candidates:*
-  - *frozen I/O JSON schemas*
-  - *a prompt plus an offline eval script*
-  - *the CRE `review` workflow*
-  - *a point-in-time backtest harness*
+- **AI workstream's first deliverable:** a **CRE `review` workflow spike** that proves an LLM call plus consensus works in `cre workflow simulate`.
+  - Then: I/O schemas in `packages/shared`, a prompt + offline eval, and the point-in-time backtest harness.
 
 ### 4.7 Mirror (CRE workflow, every 10 min, cron `0 */10 * * * *`)
 1. Fetch the backend's **positions snapshot** for all sources (1 call; up to 25 sources). The backend **refreshes it just before each run**: a cron at `:x9`, one minute ahead of each 10-minute mark.
@@ -288,6 +288,8 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 - [x] Score = average percentile rank; filters ≥ $10k, ≥ 30 days active, ≥ 10 trades
 - [x] Weights renormalized over active (non-flat) sources · ledger = target, account = truth
 - [x] Executor sanity bounds (frozen set, notional cap) · Pause + Flatten buttons for any team member · Telegram alerts
+- [x] Buckets: Aggressive (live) and Balanced share one source set; Balanced = Aggressive × `m`. Conservative uses a separate vaults + lending universe and copies the sources' lending positions. Balanced and Conservative are backtested + paper-tracked.
+- [x] AI workstream starts with a CRE `review` workflow spike (LLM call + consensus in simulation)
 - [x] Backtest: one cutoff per OOS window, anonymized + truncated prompts · the losing model is shadow-tracked on paper after go-live
 - [x] Leverage: cross margin, each asset at max leverage, exposure mirrored exactly; initial margin ≤ 95% of equity, else pro-rata scale-down
 - [x] Isolated-only HIP-3 markets excluded (59 eligible assets on 2026-10-06) · OI floor checked at go-live, then daily · source set + weights hash committed on HyperEVM at freeze · full LLM prompts/outputs logged with hashes
@@ -296,14 +298,13 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 
 **Open**
 - [ ] ❓ Composite score weights
-- [ ] ❓ Tiering: purely algorithmic, or can the agent override?
-- [ ] ❓ Balanced bucket's leverage scale or cap (after backtests); Conservative's cap
+- [ ] ❓ Balanced leverage multiplier `m` (tune from backtest)
+- [ ] ❓ How to read sources' lending positions (now and historically) for Conservative
 - [ ] ❓ Per-tier type-B threshold N; type-A time limit and DCA spacing (production design)
 - [ ] ❓ Spot-check tolerance between the snapshot and direct reads (tune in the dry run)
 - [ ] ❓ Which two models (≥ 1 OpenAI)
-- [ ] ❓ LLM in CRE: every node + per-field consensus (suggested) vs. single cached call
+- [ ] ❓ LLM in CRE: **default is every node + per-field consensus**; still open vs. a single cached call
 - [ ] ❓ Agent output format: weight grid, continuous weights, or ranking
-- [ ] ❓ AI workstream's first deliverables
 
 ---
 
