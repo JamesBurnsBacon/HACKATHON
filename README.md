@@ -106,6 +106,10 @@
   - `Eᵢ` is the source's **current** equity, and `E_ours` is ours. Scaling by current equity means we copy the source's exposure ratio, so its deposits and withdrawals don't distort our size.
 - **Position** in asset `c` = `Σᵢ slice_i,c`, netted only at order time.
 - **Trade a leg only if** the gap between the target and our position is **≥ $10 and ≥ 10%** of the target.
+- **Which assets get mirrored:**
+  - validator perps, plus **HIP-3 perps with USDC collateral**
+  - **every asset must have ≥ $20M open interest**. The line is set so it just includes the Microsoft HIP-3 market.
+  - Anything else (spot, HIP-3 with other collateral, thin markets) is skipped and shows up as tracking error.
 - The ledger is stored in Supabase. It enables per-source PnL attribution and clean removals (§4.5).
 
 ### 4.5 Source-set changes
@@ -144,7 +148,7 @@ This is a dedicated workstream, integrated into the CRE flow.
   - *a point-in-time backtest harness*
 
 ### 4.7 Mirror (CRE workflow, every 10 min, cron `0 */10 * * * *`)
-1. Fetch the backend's **positions snapshot** for all sources (1 call; the shortlist may hold up to 25 sources).
+1. Fetch the backend's **positions snapshot** for all sources (1 call; up to 25 sources). The backend **refreshes it just before each run**: a cron at `:x9`, one minute ahead of each 10-minute mark.
 2. **Spot-check:** re-read `clearinghouseState` directly from Hyperliquid for ~10 random sources plus our own account. If they disagree beyond a tolerance, reject the run. ❓ *Tolerance, since positions can move between reads.*
 3. Slices → net positions → diff against our account, applying the drift rule from §4.4.
 4. `report()` → POST to the executor, plus the report hash to a HyperEVM consumer contract.
@@ -152,11 +156,16 @@ This is a dedicated workstream, integrated into the CRE flow.
 That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
 
 ### 4.8 Execute (serverless executor)
-- Verify the DON signature, dedupe by report ID, and send IOC orders with a slippage limit.
+- Verify the DON signature and dedupe by report ID.
+- Send **IOC limit orders priced at mark ± a slippage cap**. Any unfilled remainder is retried on the next run.
 - **Keys:** a fresh EOA. A human holds the master key; the executor holds only an **HL API wallet** key (trade, no withdraw).
 - **Leverage:** mirrored exactly (Aggressive). Set via `updateLeverage`, cross margin.
 - **Kill switch:** manual only (a Supabase flag).
-- **Capital:** 5 HYPE, **swapped to USDC on HyperCore spot** (`@107`) to margin perps. Portfolio margin, which would let HYPE back positions, needs a $10k balance, and we have just under $500.
+- **Capital:** 5 HYPE, currently **on HyperEVM**.
+  - Keep **~0.1 HYPE on HyperEVM** for the consumer contract's gas.
+  - Move ~4.9 HYPE to HyperCore by sending it to the HYPE system address `0x2222…2222` (verify in a spike).
+  - **Swap to USDC on HyperCore spot** (`@107`) to margin perps. Portfolio margin, which would let HYPE back positions, needs a $10k balance, and we have just under $500.
+- **After submission:** keep running through judging, with live PnL on the public dashboard. Shut down after results.
 
 ### 4.9 Backtest (backend): the main value claim
 - **Return-based:**
@@ -171,7 +180,8 @@ That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
 - **Caveat:** the leaderboard is a *current* snapshot, so every address is a survivor and the backtest flatters us. State this in the video.
 - *Stretch:* position replay from fills (≤ 10k most recent per address), simulating the 10-minute loop, the $10 minimum and netting.
 
-### 4.10 Dashboard (Next.js + Tailwind on Vercel, Supabase realtime)
+### 4.10 Dashboard (Next.js + Tailwind on Vercel, Supabase realtime): **public, read-only**
+The kill switch and admin actions sit behind auth.
 - the funnel
 - backtest charts for each OOS window vs. BTC
 - finalist drill-down with Claude's rationale
@@ -206,14 +216,16 @@ That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
 | Frontend | Next.js + Tailwind |
 | Optional infra | **NOWNodes** (`hype.nownodes.io`): HyperEVM RPC + an Info API copy that includes `clearinghouseState`. Use it if it helps with rate limits. **Not a target track.** |
 | Not used | Coinbase AgentKit |
+| Repo | **pnpm monorepo**: `packages/{backend, cre-workflows, executor, dashboard, contracts, shared}`. `shared` holds the types and JSON schemas, which keeps the AI and backend in sync. No license yet. |
+| Testing | Unit tests on fixtures, then **tiny mainnet runs** ($10–20) before the freeze. No testnet. |
 
 ## 6. Timeline (all times SGT)
-Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules.
+Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. **Video ≤ 3 min.**
 
 | When | Milestone |
 |---|---|
 | **Before Tue 12:00** | **Handoff notes** (one member is away midday Tue): repo scaffold, Supabase schema, env vars, task split |
-| Tue 12–16 | DON access from the sponsor · fresh wallet + API wallet, swap HYPE → USDC · spikes: `portfolio` pull, $10 order, CRE cron + HTTP in simulation |
+| Tue 12–16 | DON access from the sponsor · fresh wallet + API wallet · move HYPE from HyperEVM to HyperCore (keep 0.1) and swap to USDC · spikes: `portfolio` pull, $10 IOC order, CRE cron + HTTP in simulation |
 | Tue 16–24 | `ingest` + `score` · kind labeling · start saving snapshots |
 | Wed 00–08 | **`backtest`** (return-based, 4 OOS windows, algo-only vs. algo + Claude) · `review` workflow (Claude in CRE) |
 | Wed 08–15 | `positions` API · `mirror` workflow · executor (signature check, dedupe, ledger) · end-to-end dry run with tiny size |
@@ -226,7 +238,8 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules.
 - **Short live window (~5 h)** → the value claim rests on the backtest; live only proves the mechanism.
 - **No leverage cap and no automatic halt (Aggressive)** → liquidation is possible. *Accepted:* small capital, manual kill switch, monitored throughout.
 - **$10 minimum vs. ≈ $470** → only ~5–10 net positions are possible; small legs get skipped. Show tracking error.
-- **Copy lag (≤ 10 min) and slippage** → IOC orders, slippage limit, drift rule.
+- **Copy lag (≤ 10 min) and slippage** → IOC orders, slippage limit, drift rule, $20M OI floor.
+- **No testnet** → fixtures plus $10–20 mainnet runs before the freeze.
 - **Snapshot vs. spot-check mismatch** from positions moving between reads → tolerance and timestamps.
 - **Undocumented data endpoints** → cached snapshots; HyperTracker/NOWNodes as fallbacks.
 - **Duplicate orders** → report-ID dedupe plus HL nonces.
@@ -245,6 +258,9 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules.
 - [x] Prices: Hyperliquid oracle/mark prices via the Info API, not Chainlink oracles
 - [x] AI: Claude picks 5–25 sources from ~25 algo finalists, seeing metrics, equity curve, positions and trade patterns. Value is proven by an algo-only vs. algo + Claude backtest.
 - [x] Backtest haircut: modeled from turnover. Type-B threshold is tier-dependent.
+- [x] Markets: validator perps + USDC-collateral HIP-3, every asset ≥ $20M OI. Orders: IOC limit with a slippage cap.
+- [x] Snapshot refreshed just before each CRE run · keep 0.1 HYPE on HyperEVM for gas
+- [x] pnpm monorepo, no license yet · fixtures + tiny mainnet testing · public read-only dashboard · video ≤ 3 min · keep running through judging
 - [x] Stack: TS, `@nktkas/hyperliquid`, Claude Sonnet 5.5, Supabase, Next.js + Tailwind, Railway + Vercel. NOWNodes optional; no AgentKit.
 
 **Open**
