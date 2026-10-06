@@ -112,7 +112,7 @@
   - validator perps, plus **HIP-3 perps with USDC collateral**
   - **every asset must have ≥ $20M open interest**. The line is set so it just includes the Microsoft HIP-3 market.
   - Anything else (spot, HIP-3 with other collateral, thin markets) is skipped and shows up as tracking error.
-  - **Isolated-only markets (`onlyIsolated`: `noCross` / `strictIsolated`) are excluded**, so we keep one cross margin pool. As of 2026-10-06 that leaves **58 assets**: 38 core perps + 20 HIP-3.
+  - **Isolated-only markets (`onlyIsolated`: `noCross` / `strictIsolated`) are excluded**, so we keep one cross margin pool. As of 2026-10-06 that leaves **59 assets**: 38 core perps + 21 HIP-3.
   - The OI floor is checked **at go-live (then daily)**. An intraday dip below $20M is ignored until the next check.
 - The ledger is stored in Supabase. It enables per-source PnL attribution and clean removals (§4.5).
 
@@ -290,7 +290,7 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 - [x] Executor sanity bounds (frozen set, notional cap) · Pause + Flatten buttons for any team member · Telegram alerts
 - [x] Backtest: one cutoff per OOS window, anonymized + truncated prompts · the losing model is shadow-tracked on paper after go-live
 - [x] Leverage: cross margin, each asset at max leverage, exposure mirrored exactly; initial margin ≤ 95% of equity, else pro-rata scale-down
-- [x] Isolated-only HIP-3 markets excluded (58 eligible assets on 2026-10-06) · OI floor checked at go-live, then daily · source set + weights hash committed on HyperEVM at freeze · full LLM prompts/outputs logged with hashes
+- [x] Isolated-only HIP-3 markets excluded (59 eligible assets on 2026-10-06) · OI floor checked at go-live, then daily · source set + weights hash committed on HyperEVM at freeze · full LLM prompts/outputs logged with hashes
 - [x] pnpm monorepo, no license yet · fixtures + tiny mainnet testing · public read-only dashboard · video ≤ 3 min · keep running through judging
 - [x] Stack: TS, `@nktkas/hyperliquid`, two LLMs, Supabase, Next.js + Tailwind, Railway + Vercel. NOWNodes optional; no AgentKit.
 
@@ -329,7 +329,7 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 - **Markets ≥ $20M OI on 2026-10-06:** 71 total.
   - 38 core perps, all of which allow cross margin.
   - 33 HIP-3: 32 on the `xyz` dex + `io:ANTH`, all with USDC collateral (`collateralToken` 0).
-  - **13 HIP-3 markets are isolated-only:** CBRS, MSTR, HOOD, SOXL, CXMT, JPY, SMSN, NBIS, ORCL, ZHIPU, EUR (`noCross`); `io:ANTH` (`strictIsolated`).
+  - **12 HIP-3 markets are isolated-only:** CBRS, MSTR, HOOD, SOXL, CXMT, JPY, SMSN, NBIS, ORCL, ZHIPU, EUR (`noCross`); `io:ANTH` (`strictIsolated`).
   - HIP-3 max leverage ranges 6–50x (10x is common). MSFT sits just above the floor at $20.8M.
   - Source: `perpDexs` + `metaAndAssetCtxs` with a `dex` parameter.
 - The minimum order is **$10**.
