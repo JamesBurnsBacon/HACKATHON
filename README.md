@@ -75,6 +75,7 @@
   - ≥ 30 days active
   - ≥ 10 trades
   - not closed
+  - **≥ 25 points in the `portfolio` `month` window**. History length varies a lot by address (issue #1), so "≥ 30 days active" alone doesn't guarantee enough points for Sortino/Calmar. Short-history addresses are **excluded**, with no fallback metric.
 - **Score = average percentile rank** of 30-day **Sortino**, **Calmar / −max drawdown** and **PnL consistency**. Computed from PnL history, so deposits and withdrawals don't count as returns. **Top ~25 → finalists.**
 - **Also computed** for the agent:
   - realized volatility and average leverage
@@ -101,6 +102,8 @@
   - excluding **isolated-only** markets
   - That's **59 assets** on 2026-10-06. Everything else is skipped, which counts as tracking error.
   - The OI floor is checked at go-live, then daily.
+  - **Hysteresis:** an asset becomes eligible at ≥ $20M OI and stays eligible until it falls **below $15M**. This stops borderline markets from flipping in and out; e.g. `xyz:MSFT` sat at ~$20.8M (issue #1).
+  - **If an asset we hold loses eligibility** at a daily check, its slices become **reduce-only**: we follow sources' reductions and closes, the same pattern as type-A removal.
 
 ### 4.5 Source-set changes
 **Hackathon: the set is fully frozen at go-live.** The agent only monitors.
@@ -121,7 +124,7 @@ A dedicated workstream, integrated into the CRE flow.
 - **After go-live:** monitoring and commentary only.
 - **Inputs per finalist:**
   - metrics and kind
-  - a ~30-point daily equity curve
+  - an equity-curve summary (the `month` window: 26–48 points)
   - current positions (size, leverage, distance to liquidation)
   - trade patterns
   - time in market
@@ -173,7 +176,7 @@ That is ≤ 13 HTTP calls, under CRE's limit of 15.
 - **Disclosures:**
   - **Survivorship:** the leaderboard is a current snapshot.
   - **Copy delay:** the backtest assumes instant copies. Live delay can move prices either way (tracking error) and misses very short trades.
-  - **Resolution:** ≈ daily data within 30 days; ≈ weekly beyond that.
+  - **Resolution:** `month` has 26–48 points (≈ every 15–28 h) and `allTime` 35–104 points (≈ weekly for recent accounts). The resolution varies by address, so metrics must handle irregular spacing.
 - *Stretch:* fills-based replay with the 10-minute delay, the $10 minimum and netting.
 
 ### 4.10 Paper books (backend only)
@@ -265,7 +268,13 @@ Budget ~1 h of testing per 2 h of features. Integrate only tested modules.
   - The HL docs call HyperCore vaults **legacy** (perps only, no spot/HIP-3, 10% leader profit share, 1-day depositor lockup).
 - **Info API** (`POST https://api.hyperliquid.xyz/info`):
   - `portfolio`: account value + PnL history for `day` / `week` / `month` / `allTime` (+ `perp*` versions).
-    - Only **~100 points per window**: ≈ daily for `month`, ≈ weekly for `allTime`.
+    - **Point counts vary by address.** Issue #1 sampled 20 leaderboard addresses (≥ $10k, positive month + all-time PnL) and found min / median / max of:
+      - `day` 12 / 13 / 17
+      - `week` 61 / 63 / 66
+      - `month` **26 / 44 / 48**
+      - `allTime` **35 / 56 / 104**
+    - The spacing is irregular, so compute returns on actual timestamps.
+    - The same check confirmed 47,466 leaderboard rows, 234 open vaults with TVL ≥ $10k, 71 markets ≥ $20M OI (38 core + 33 HIP-3), and `eth_getCode` working on `https://rpc.hyperliquid.xyz/evm`.
   - `clearinghouseState` gives positions. `userFillsByTime` gives fills; only the 10k most recent are reachable, and older fills are in the requester-pays S3 bucket `hl-mainnet-node-data`. Also `userFunding` and `vaultDetails`.
 - **Rate limits:** 1200 weight/min per IP. Most info calls cost 20; `clearinghouseState` / `allMids` cost 2.
 - **HyperTracker** (CoinMarketMan): paid API with a free tier of 100 tokens/day, then $179–$1,999/month.
