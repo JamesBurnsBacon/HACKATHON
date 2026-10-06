@@ -86,12 +86,14 @@
    - **≥ 10 trades**
    - not closed
 2. **Metrics:** computed from PnL history, not account value, so deposits and withdrawals don't count as returns.
+   - **Maker/taker volume split** is a screening feature. A high maker share suggests an institution or sophisticated trader. Source: `crossed` on fills, or daily maker/taker volume from `userFees` (verify).
+     - ⚠️ Market makers' positions are inventory, not directional bets, and may not be copyable at a 10-minute lag. It is also an agent input (§4.6).
    - Sharpe, Sortino, Calmar
    - max drawdown
    - PnL consistency
    - realized volatility
    - average leverage
-3. **Composite score = average percentile rank** across metrics (Sortino, Calmar, consistency, −max drawdown, …). This is robust to outliers and needs no scale tuning. **Top ~25 → finalists** for the agent (§4.6).
+3. **Composite score = average percentile rank** across **30-day Sortino, Calmar / −max drawdown, and PnL consistency**. This is robust to outliers and needs no scale tuning. **Top ~25 → finalists** for the agent (§4.6).
 
 ### 4.3 Buckets (risk tiers)
 | Bucket | Source universe | Exposure | Hackathon mode |
@@ -129,7 +131,7 @@
 | **A: edged out** | A better performer takes the spot | Recompute targets with the new mix. Legs left **misaligned with the new allocation become reduce-only**: we follow only the old source's reductions and closes, so it stays the reference and nothing is orphaned. After a time limit, **DCA out in 2–3 trades over a few hours**. |
 | **B: performed badly** | The source's **own account drawdown ≥ N%** from peak, measured on PnL history (not deposits/withdrawals). **N depends on the tier** (e.g. 15% Conservative / 25% Balanced / 40% Aggressive) | **Immediate exit** of its slices on the next run, netted against the other slices. |
 
-❓ *What are the per-tier values of N, the type-A time limit, and the DCA spacing?*
+**Type-A default:** 24 h reduce-only, then DCA out in **3 trades over 3 h**. ❓ *Per-tier values of N.*
 
 ### 4.6 AI layer: LLM agent inside the CRE `review` workflow (hourly)
 This is a dedicated workstream, integrated into the CRE flow.
@@ -144,6 +146,7 @@ This is a dedicated workstream, integrated into the CRE flow.
   - current positions (asset, size, leverage, distance to liquidation)
   - recent trade patterns (frequency, holding time, averaging down)
   - time in market
+  - maker/taker volume split
   - the finalists' correlation matrix and vault ↔ leader links
   - **Budget:** ≈ 25 × ≤ 4 KB, which keeps the prompt under CRE's **120 KB request limit**.
 - **Models:** **two models are compared in the backtest; at least one is from OpenAI.** ❓ *Which two (e.g. Claude Sonnet 5.5 vs. an OpenAI model)?* **The backtest winner drives the live set.**
@@ -162,7 +165,7 @@ This is a dedicated workstream, integrated into the CRE flow.
 
 ### 4.7 Mirror (CRE workflow, every 10 min, cron `0 */10 * * * *`)
 1. Fetch the backend's **positions snapshot** for all sources (1 call; up to 25 sources). The backend **refreshes it just before each run**: a cron at `:x9`, one minute ahead of each 10-minute mark.
-2. **Spot-check:** re-read `clearinghouseState` directly from Hyperliquid for ~10 random sources plus our own account. If they disagree beyond a tolerance, reject the run. ❓ *Tolerance, since positions can move between reads.*
+2. **Spot-check:** re-read `clearinghouseState` directly from Hyperliquid for ~10 random sources plus our own account. **Reject the run if any source's notional differs by more than 5% of its equity** (default; tune in the dry run).
 3. Slices → net positions → diff against our account, applying the drift rule from §4.4.
 4. `report()` → POST to the executor, plus the report hash to a HyperEVM consumer contract.
 
@@ -295,7 +298,8 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 - [x] Backtest haircut: modeled from turnover. Type-B threshold is tier-dependent.
 - [x] Markets: validator perps + USDC-collateral HIP-3, every asset ≥ $20M OI. Orders: IOC limit with a slippage cap.
 - [x] Snapshot refreshed just before each CRE run · keep 0.1 HYPE on HyperEVM for gas
-- [x] Score = average percentile rank; filters ≥ $10k, ≥ 30 days active, ≥ 10 trades
+- [x] Score = average percentile rank of 30d Sortino, Calmar/−max drawdown, PnL consistency; maker/taker split as a screening feature; filters ≥ $10k, ≥ 30 days active, ≥ 10 trades
+- [x] Spot-check tolerance ≤ 5% of source equity (default) · type-A unwind: 24 h reduce-only, then 3 trades over 3 h
 - [x] Weights renormalized over active (non-flat) sources · ledger = target, account = truth
 - [x] Executor sanity bounds (frozen set, notional cap) · Pause + Flatten buttons for any team member · Telegram alerts
 - [x] Buckets: Aggressive (live) and Balanced share one source set; Balanced = Aggressive × `m`. Conservative uses a separate vaults + lending universe and copies the sources' lending positions. Balanced and Conservative are backtested + paper-tracked.
@@ -309,11 +313,10 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 - [x] Stack: TS, `@nktkas/hyperliquid`, two LLMs, Supabase, Next.js + Tailwind, Railway + Vercel. NOWNodes optional; no AgentKit.
 
 **Open**
-- [ ] ❓ Composite score weights
+- [ ] ❓ Is a high maker share a plus (sophistication) or an exclusion (market-making inventory isn't copyable)?
 - [ ] ❓ Balanced leverage multiplier `m` (tune from backtest)
 - [ ] ❓ How to read sources' lending positions (now and historically) for Conservative
-- [ ] ❓ Per-tier type-B threshold N; type-A time limit and DCA spacing (production design)
-- [ ] ❓ Spot-check tolerance between the snapshot and direct reads (tune in the dry run)
+- [ ] ❓ Per-tier type-B threshold N (production design)
 - [ ] ❓ Which two models (≥ 1 OpenAI)
 - [ ] ❓ LLM in CRE: **default is every node + per-field consensus**; still open vs. a single cached call
 - [ ] ❓ Agent output format: weight grid, continuous weights, or ranking
