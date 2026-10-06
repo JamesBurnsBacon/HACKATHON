@@ -205,7 +205,15 @@ That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
 - **Caveat:** the leaderboard is a *current* snapshot, so every address is a survivor and the backtest flatters us. State this in the video.
 - *Stretch:* position replay from fills (≤ 10k most recent per address), simulating the 10-minute loop, the $10 minimum and netting.
 
-### 4.10 Dashboard (Next.js + Tailwind on Vercel, Supabase realtime): **public, read-only**
+### 4.10 Paper books (backend only, not via CRE)
+- **Books:**
+  - **Balanced** (Aggressive × `m`)
+  - **Conservative** (vaults + lending)
+  - the **losing model's** Aggressive picks (shadow)
+- **Sizes:** each book is tracked at **two starting equities**: **~$470**, the same as live including the $10-minimum effect, and **$10k**, which shows the strategy without minimum-order distortion. The live Aggressive book also gets a $10k paper twin.
+- **Fills:** each 10-minute run uses the same positions snapshot. Paper fills happen at **HL mark price, plus the taker fee, plus the backtest's slippage bps**, with the $10 minimum applied.
+
+### 4.11 Dashboard (Next.js + Tailwind on Vercel, Supabase realtime): **public, read-only**
 The kill switch and admin actions sit behind auth.
 - the funnel
 - backtest charts for each OOS window vs. BTC
@@ -215,7 +223,7 @@ The kill switch and admin actions sit behind auth.
 - **per-source PnL from the ledger**
 - the CRE run log with HyperEVM hashes
 
-### 4.11 Module contracts
+### 4.12 Module contracts
 | Module | Input | Output (Supabase / API) |
 |---|---|---|
 | `ingest` | leaderboard, vault list, HL Info API, HyperEVM RPC | `snapshots` (kind, equity, PnL history, positions) |
@@ -225,6 +233,7 @@ The kill switch and admin actions sit behind auth.
 | `positions` | source set | positions snapshot API |
 | `mirror` (CRE) | positions snapshot + spot-checks + `ledger` | signed report + HyperEVM hash |
 | `execute` | report | `orders`, `fills`, updated `ledger` |
+| `paper` | positions snapshot, buckets, mark prices | `paper_books` (Balanced, Conservative, shadow; $470 and $10k) |
 | `dashboard` | all of the above | — |
 
 ## 5. Stack
@@ -243,6 +252,7 @@ The kill switch and admin actions sit behind auth.
 | Not used | Coinbase AgentKit |
 | Repo | **pnpm monorepo**: `packages/{backend, cre-workflows, executor, dashboard, contracts, shared}`. `shared` holds the types and JSON schemas, which keeps the AI and backend in sync. No license yet. |
 | Testing | Unit tests on fixtures, then **tiny mainnet runs** ($10–20) before the freeze. No testnet. |
+| Secrets | Railway/Vercel env vars, plus CRE secrets (Vault DON) for LLM keys. `.env.example` in the repo, never real values. |
 
 ## 6. Timeline (all times SGT)
 Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. **Video ≤ 3 min.**
@@ -255,8 +265,8 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 | Wed 00–08 | **`backtest`** (return-based, 4 OOS windows, algo-only vs. model A vs. model B) · `review` workflow (agent in CRE) |
 | Wed 08–15 | `positions` API · `mirror` workflow · executor (signature check, dedupe, ledger) · end-to-end dry run with tiny size |
 | Wed 15–19 | Dashboard: funnel, backtest charts, ledger PnL, CRE log · HyperEVM consumer contract · **freeze the source set** |
-| **Wed 19:00** | **Go live** on mainnet |
-| Wed 19–Thu 00 | Monitor, record the video, submit |
+| **Wed 19:00** | **Go live** on mainnet. **Gate:** the backtest winner is chosen and the set + weights hash is committed on HyperEVM; a $10–20 end-to-end mainnet run has passed (CRE report → executor → fill → ledger → dashboard) |
+| Wed 19–Thu 00 | Monitor, record the video. **Before submitting:** make the README judge-facing (results, demo link, how to run) and move all design content to `docs/DESIGN.md` |
 
 ## 7. Risks
 - **Backtest survivorship** → stated openly; our own snapshots start a forward record.
@@ -290,6 +300,8 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 - [x] Executor sanity bounds (frozen set, notional cap) · Pause + Flatten buttons for any team member · Telegram alerts
 - [x] Buckets: Aggressive (live) and Balanced share one source set; Balanced = Aggressive × `m`. Conservative uses a separate vaults + lending universe and copies the sources' lending positions. Balanced and Conservative are backtested + paper-tracked.
 - [x] AI workstream starts with a CRE `review` workflow spike (LLM call + consensus in simulation)
+- [x] Go-live gate: backtest winner chosen + set frozen and committed; tiny mainnet run passed · secrets in platform env vars + CRE secrets · before submission, the README becomes judge-facing and design moves to `docs/DESIGN.md`
+- [x] Paper books (Balanced, Conservative, shadow model) run in the backend only, at ~$470 and $10k, with fills at mark + fees + slippage
 - [x] Backtest: one cutoff per OOS window, anonymized + truncated prompts · the losing model is shadow-tracked on paper after go-live
 - [x] Leverage: cross margin, each asset at max leverage, exposure mirrored exactly; initial margin ≤ 95% of equity, else pro-rata scale-down
 - [x] Isolated-only HIP-3 markets excluded (59 eligible assets on 2026-10-06) · OI floor checked at go-live, then daily · source set + weights hash committed on HyperEVM at freeze · full LLM prompts/outputs logged with hashes
