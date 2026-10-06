@@ -95,7 +95,7 @@
 
 ### 4.3 Buckets (risk tiers)
 - Finalists are tiered by **realized volatility + average leverage**. ❓ *Is tiering purely algorithmic, or can the agent override a tier with a justification?*
-- **Aggressive (live):** the source set with leverage mirrored exactly, no cap.
+- **Aggressive (live):** the source set with exposure mirrored exactly. There's no leverage cap beyond the 95% margin feasibility rule (§4.8).
 - **Balanced:** the **same source set as Aggressive**, with leverage scaled down or capped. ❓ *How: e.g. ×0.5 exposure or a portfolio leverage cap? Decide after the backtests.*
 - **Conservative:** the low-vol / low-leverage tier, with leverage capped.
 - **The agent** assigns weights within each tier and writes the rationale.
@@ -112,6 +112,8 @@
   - validator perps, plus **HIP-3 perps with USDC collateral**
   - **every asset must have ≥ $20M open interest**. The line is set so it just includes the Microsoft HIP-3 market.
   - Anything else (spot, HIP-3 with other collateral, thin markets) is skipped and shows up as tracking error.
+  - **Isolated-only markets (`onlyIsolated`: `noCross` / `strictIsolated`) are excluded**, so we keep one cross margin pool. As of 2026-10-06 that leaves **58 assets**: 38 core perps + 20 HIP-3.
+  - The OI floor is checked **at go-live (then daily)**. An intraday dip below $20M is ignored until the next check.
 - The ledger is stored in Supabase. It enables per-source PnL attribution and clean removals (§4.5).
 
 ### 4.5 Source-set changes
@@ -149,6 +151,7 @@ This is a dedicated workstream, integrated into the CRE flow.
   - *a discrete weight grid (e.g. 0–3 units), which works well with identical-result consensus*
   - *continuous weights with median consensus*
   - *a ranking plus a fixed weight formula*
+- **Logging:** every run's full prompt and output are stored in Supabase with their hashes, for reproducibility and so the dashboard can show exactly what the model saw and said.
 - **Proving value:** the backtest compares **algo-only top-N vs. algo + model A vs. algo + model B** (§4.9).
 - **Live shadow:** after go-live, the losing model's picks are tracked **on paper** (no orders), so the video can show both side by side.
 - ❓ *AI workstream's first deliverables, so others can build in parallel. Candidates:*
@@ -163,6 +166,8 @@ This is a dedicated workstream, integrated into the CRE flow.
 3. Slices → net positions → diff against our account, applying the drift rule from §4.4.
 4. `report()` → POST to the executor, plus the report hash to a HyperEVM consumer contract.
 
+**Freeze commitment:** at go-live, the `review` workflow writes a hash of the **frozen source set + weights** to HyperEVM *before* the first trade. That proves the picks were made before the live results.
+
 That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
 
 ### 4.8 Execute (serverless executor)
@@ -170,7 +175,11 @@ That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
 - **Sanity bounds:** reject a report if its source set differs from the frozen set, or if total notional exceeds a bound (e.g. 50× equity).
 - Send **IOC limit orders priced at mark ± a slippage cap**. Any unfilled remainder is retried on the next run.
 - **Keys:** a fresh EOA. A human holds the master key; the executor holds only an **HL API wallet** key (trade, no withdraw).
-- **Leverage:** mirrored exactly (Aggressive). Set via `updateLeverage`, cross margin.
+- **Leverage management:**
+  - **Cross margin for all assets.**
+  - Each asset is set to **its max leverage** (`updateLeverage`; e.g. many HIP-3 markets default to 10x, BTC up to 40x). This locks the least margin per leg.
+  - The sources' **exposure ratios are mirrored exactly**, unless margin binds.
+  - **Feasibility check each run:** required initial margin `Σ |N_c| / maxLev_c` must stay **≤ 95% of our equity**. If it doesn't, **scale all targets down pro-rata** by `k = 0.95·E_ours / Σ |N_c| / maxLev_c`, which keeps the mix and under-copies everything.
 - **Kill switch:** manual only, with two buttons that any team member can press (Supabase auth):
   - **Pause:** stop trading and keep positions.
   - **Flatten:** close everything.
@@ -252,7 +261,7 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 ## 7. Risks
 - **Backtest survivorship** → stated openly; our own snapshots start a forward record.
 - **Short live window (~5 h)** → the value claim rests on the backtest; live only proves the mechanism.
-- **No leverage cap and no automatic halt (Aggressive)** → liquidation is possible. *Accepted:* small capital, manual kill switch, monitored throughout.
+- **No leverage cap and no automatic halt (Aggressive)** → liquidation is possible. *Mitigated* only by the 95% initial-margin rule and pro-rata scaling. *Accepted:* small capital, Pause/Flatten buttons, Telegram alerts, monitored throughout.
 - **$10 minimum vs. ≈ $470** → only ~5–10 net positions are possible; small legs get skipped. Show tracking error.
 - **Copy lag (≤ 10 min) and slippage** → IOC orders, slippage limit, drift rule, $20M OI floor.
 - **No testnet** → fixtures plus $10–20 mainnet runs before the freeze.
@@ -280,6 +289,8 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 - [x] Weights renormalized over active (non-flat) sources · ledger = target, account = truth
 - [x] Executor sanity bounds (frozen set, notional cap) · Pause + Flatten buttons for any team member · Telegram alerts
 - [x] Backtest: one cutoff per OOS window, anonymized + truncated prompts · the losing model is shadow-tracked on paper after go-live
+- [x] Leverage: cross margin, each asset at max leverage, exposure mirrored exactly; initial margin ≤ 95% of equity, else pro-rata scale-down
+- [x] Isolated-only HIP-3 markets excluded (58 eligible assets on 2026-10-06) · OI floor checked at go-live, then daily · source set + weights hash committed on HyperEVM at freeze · full LLM prompts/outputs logged with hashes
 - [x] pnpm monorepo, no license yet · fixtures + tiny mainnet testing · public read-only dashboard · video ≤ 3 min · keep running through judging
 - [x] Stack: TS, `@nktkas/hyperliquid`, two LLMs, Supabase, Next.js + Tailwind, Railway + Vercel. NOWNodes optional; no AgentKit.
 
@@ -315,6 +326,12 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 - **HyperTracker** (CoinMarketMan): paid API with a free tier of 100 tokens/day, then $179–$1,999/month.
 
 ### Hyperliquid execution
+- **Markets ≥ $20M OI on 2026-10-06:** 71 total.
+  - 38 core perps, all of which allow cross margin.
+  - 33 HIP-3: 32 on the `xyz` dex + `io:ANTH`, all with USDC collateral (`collateralToken` 0).
+  - **13 HIP-3 markets are isolated-only:** CBRS, MSTR, HOOD, SOXL, CXMT, JPY, SMSN, NBIS, ORCL, ZHIPU, EUR (`noCross`); `io:ANTH` (`strictIsolated`).
+  - HIP-3 max leverage ranges 6–50x (10x is common). MSFT sits just above the floor at $20.8M.
+  - Source: `perpDexs` + `metaAndAssetCtxs` with a `dex` parameter.
 - The minimum order is **$10**.
 - API (agent) wallets sign orders and other L1 actions. Withdrawals and transfers need the master wallet.
 - **Collateral:** standard perps margin is USDC.
