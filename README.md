@@ -91,12 +91,12 @@
    - PnL consistency
    - realized volatility
    - average leverage
-3. **Composite score → finalists.** ❓ *Weights.*
+3. **Composite score → ~25 finalists**, which are handed to Claude (§4.6). ❓ *Weights.*
 
 ### 4.3 Buckets (risk tiers)
-- Finalists are tiered by **realized volatility + average leverage**.
+- Finalists are tiered by **realized volatility + average leverage**. ❓ *Is tiering purely algorithmic, or can Claude override a tier with a justification?*
 - **Aggressive (live):** the source set with leverage mirrored exactly, no cap.
-- **Balanced:** the **same source set as Aggressive**, with leverage scaled down or capped. ❓ *Scale factor or cap.*
+- **Balanced:** the **same source set as Aggressive**, with leverage scaled down or capped. ❓ *How: e.g. ×0.5 exposure or a portfolio leverage cap? Decide after the backtests.*
 - **Conservative:** the low-vol / low-leverage tier, with leverage capped.
 - **Claude** assigns weights within each tier and writes the rationale.
 
@@ -116,17 +116,32 @@
 | Type | Cause | Handling |
 |---|---|---|
 | **A: edged out** | A better performer takes the spot | Recompute targets with the new mix. Legs left **misaligned with the new allocation become reduce-only**: we follow only the old source's reductions and closes, so it stays the reference and nothing is orphaned. After a time limit, **DCA out in 2–3 trades over a few hours**. |
-| **B: performed badly** | The source's **own account drawdown ≥ N%** from peak, measured on PnL history (not deposits/withdrawals) | **Immediate exit** of its slices on the next run, netted against the other slices. |
+| **B: performed badly** | The source's **own account drawdown ≥ N%** from peak, measured on PnL history (not deposits/withdrawals). **N depends on the tier** (e.g. 15% Conservative / 25% Balanced / 40% Aggressive) | **Immediate exit** of its slices on the next run, netted against the other slices. |
 
-❓ *What are N, the type-A time limit, and the DCA spacing?*
+❓ *What are the per-tier values of N, the type-A time limit, and the DCA spacing?*
 
-### 4.6 Review (CRE workflow, hourly)
-- Fetch the finalist and source stats (1 HTTP GET with identical-result consensus).
-- Call **Claude Sonnet 5.5** (`claude-sonnet-5-5`) with structured JSON output. It returns:
-  - rationale and red flags (martingale, wash-like behavior, concentration, near-liquidation)
-  - bucket weights before go-live
-- Field-level consensus → `report()` → Supabase.
-- After go-live it is **monitoring only**; it never changes the frozen set.
+### 4.6 AI layer: Claude inside the CRE `review` workflow (hourly)
+This is a dedicated workstream, integrated into the CRE flow.
+- **Role (before go-live):** Claude **picks 5–25 sources from the ~25 algo finalists** and assigns weights, with a rationale and red flags (martingale, wash-like behavior, concentration, near-liquidation). The algo sets the minimum bar; Claude adds judgment.
+- **After go-live:** monitoring and commentary only. The set stays frozen.
+- **Inputs for each finalist:**
+  - the metrics table and kind
+  - an equity-curve summary (~30 daily points)
+  - current positions (asset, size, leverage, distance to liquidation)
+  - recent trade patterns (frequency, holding time, averaging down)
+  - **Budget:** ≈ 25 × ≤ 4 KB, which keeps the prompt under CRE's **120 KB request limit**.
+- **Model:** Claude Sonnet 5.5 (`claude-sonnet-5-5`) with structured JSON output. The API key is a CRE secret, which is acceptable since every node can read it.
+- **Consensus:** ❓ *Open. Suggested: **every DON node calls Claude** and we run **per-field consensus**. That's truly decentralized AI, at N× the API calls per run. The alternative is a single call via `cacheSettings`.*
+- **Output format:** ❓ *Open. Options:*
+  - *a discrete weight grid (e.g. 0–3 units), which works well with identical-result consensus*
+  - *continuous weights with median consensus*
+  - *a ranking plus a fixed weight formula*
+- **Proving value:** the backtest compares **algo-only top-N vs. algo + Claude** (§4.9).
+- ❓ *AI workstream's first deliverables, so others can build in parallel. Candidates:*
+  - *frozen I/O JSON schemas*
+  - *a prompt plus an offline eval script*
+  - *the CRE `review` workflow*
+  - *a point-in-time backtest harness*
 
 ### 4.7 Mirror (CRE workflow, every 10 min, cron `0 */10 * * * *`)
 1. Fetch the backend's **positions snapshot** for all sources (1 call; the shortlist may hold up to 25 sources).
@@ -146,10 +161,12 @@ That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
 ### 4.9 Backtest (backend): the main value claim
 - **Return-based:**
   - Portfolio return ≈ `Σ wᵢ · rᵢ` of the sources' PnL-history returns.
-  - Subtract a fee and slippage haircut.
+  - Subtract a fee and slippage haircut **based on modeled turnover**: estimate each source's turnover from volume / equity, then charge the HL taker fee plus a few bps of slippage per unit.
   - This follows from §4.4: equity-ratio scaling makes our return a weighted sum of source returns.
 - **In-sample** is all of an address's history **before** the cut. **Out-of-sample** windows are the **last 2 weeks, 1 month, 6 weeks, and 3 months**.
 - Report each window against holding BTC.
+- **Algo-only vs. algo + Claude:** at each OOS cutoff, Claude sees **only data from before the cut** and picks from the algo finalists. Compare its picks' OOS returns with the algo's top-N.
+  - ⚠️ Point-in-time *positions and trade patterns* can only be rebuilt from fills (≤ 10k most recent). The backtest-time Claude may therefore get only metrics plus the truncated equity curve. Disclose this.
 - **Data resolution:** OOS windows within the last 30 days have ≈ daily points (`month` window). The 6-week and 3-month windows only have ≈ weekly points (`allTime`).
 - **Caveat:** the leaderboard is a *current* snapshot, so every address is a survivor and the backtest flatters us. State this in the video.
 - *Stretch:* position replay from fills (≤ 10k most recent per address), simulating the 10-minute loop, the $10 minimum and netting.
@@ -198,7 +215,7 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules.
 | **Before Tue 12:00** | **Handoff notes** (one member is away midday Tue): repo scaffold, Supabase schema, env vars, task split |
 | Tue 12–16 | DON access from the sponsor · fresh wallet + API wallet, swap HYPE → USDC · spikes: `portfolio` pull, $10 order, CRE cron + HTTP in simulation |
 | Tue 16–24 | `ingest` + `score` · kind labeling · start saving snapshots |
-| Wed 00–08 | **`backtest`** (return-based, 4 OOS windows) · `review` workflow (Claude) |
+| Wed 00–08 | **`backtest`** (return-based, 4 OOS windows, algo-only vs. algo + Claude) · `review` workflow (Claude in CRE) |
 | Wed 08–15 | `positions` API · `mirror` workflow · executor (signature check, dedupe, ledger) · end-to-end dry run with tiny size |
 | Wed 15–19 | Dashboard: funnel, backtest charts, ledger PnL, CRE log · HyperEVM consumer contract · **freeze the source set** |
 | **Wed 19:00** | **Go live** on mainnet |
@@ -226,14 +243,19 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules.
 - [x] CRE: hourly `review` + 10-minute `mirror`. Mirror uses the backend snapshot plus a direct spot-check of ~10 sources. CRE decides, the executor signs; hash on HyperEVM.
 - [x] Capital: 5 HYPE → USDC on HyperCore spot (portfolio margin needs $10k)
 - [x] Prices: Hyperliquid oracle/mark prices via the Info API, not Chainlink oracles
+- [x] AI: Claude picks 5–25 sources from ~25 algo finalists, seeing metrics, equity curve, positions and trade patterns. Value is proven by an algo-only vs. algo + Claude backtest.
+- [x] Backtest haircut: modeled from turnover. Type-B threshold is tier-dependent.
 - [x] Stack: TS, `@nktkas/hyperliquid`, Claude Sonnet 5.5, Supabase, Next.js + Tailwind, Railway + Vercel. NOWNodes optional; no AgentKit.
 
 **Open**
 - [ ] ❓ Composite score weights
-- [ ] ❓ Balanced bucket's leverage scale or cap; Conservative's cap
-- [ ] ❓ Type-B drawdown threshold N; type-A time limit and DCA spacing (production design)
-- [ ] ❓ Spot-check tolerance between the snapshot and direct reads
-- [ ] ❓ Fee/slippage haircut assumed in the backtest
+- [ ] ❓ Tiering: purely algorithmic, or can Claude override?
+- [ ] ❓ Balanced bucket's leverage scale or cap (after backtests); Conservative's cap
+- [ ] ❓ Per-tier type-B threshold N; type-A time limit and DCA spacing (production design)
+- [ ] ❓ Spot-check tolerance between the snapshot and direct reads (tune in the dry run)
+- [ ] ❓ Claude in CRE: every node + per-field consensus (suggested) vs. single cached call
+- [ ] ❓ Claude output format: weight grid, continuous weights, or ranking
+- [ ] ❓ AI workstream's first deliverables
 - [ ] ❓ Should the executor cross-check reports against its own copy of the bucket weights?
 
 ---
