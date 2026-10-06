@@ -147,6 +147,7 @@ This is a dedicated workstream, integrated into the CRE flow.
   - recent trade patterns (frequency, holding time, averaging down)
   - time in market
   - maker/taker volume split
+  - holding times. The agent judges whether a source trades too fast to copy at a 10-minute delay.
   - the finalists' correlation matrix and vault ↔ leader links
   - **Budget:** ≈ 25 × ≤ 4 KB, which keeps the prompt under CRE's **120 KB request limit**.
 - **Models:** **two models are compared in the backtest; at least one is from OpenAI.** ❓ *Which two (e.g. Claude Sonnet 5.5 vs. an OpenAI model)?* **The backtest winner drives the live set.**
@@ -168,6 +169,8 @@ This is a dedicated workstream, integrated into the CRE flow.
 2. **Spot-check:** re-read `clearinghouseState` directly from Hyperliquid for ~10 random sources plus our own account. **Reject the run if any source's notional differs by more than 5% of its equity** (default; tune in the dry run).
 3. Slices → net positions → diff against our account, applying the drift rule from §4.4.
 4. `report()` → POST to the executor, plus the report hash to a HyperEVM consumer contract.
+
+**If a run fails** (consensus failure, spot-check reject, timeout): **hold positions**, retry on the next run, and send a Telegram alert after 2 consecutive failures. There is no backend fallback that trades without CRE.
 
 **Freeze commitment:** at go-live, the `review` workflow writes a hash of the **frozen source set + weights** to HyperEVM *before* the first trade. That proves the picks were made before the live results.
 
@@ -206,6 +209,7 @@ That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
   - ⚠️ Point-in-time *positions and trade patterns* can only be rebuilt from fills (≤ 10k most recent). The backtest-time agent may therefore get only metrics plus the truncated equity curve. Disclose this.
 - **Data resolution:** OOS windows within the last 30 days have ≈ daily points (`month` window). The 6-week and 3-month windows only have ≈ weekly points (`allTime`).
 - **Caveat:** the leaderboard is a *current* snapshot, so every address is a survivor and the backtest flatters us. State this in the video.
+- **Copy delay:** the return-based backtest assumes **instant copying at the sources' prices**. Live, we copy up to 10 minutes later, which can mean better *or* worse prices: tracking error, not a known bias. Trades shorter than the delay are missed. **Disclose it**; the fills-based replay (stretch) simulates the delay properly.
 - *Stretch:* position replay from fills (≤ 10k most recent per address), simulating the 10-minute loop, the $10 minimum and netting.
 
 ### 4.10 Paper books (backend only, not via CRE)
@@ -218,6 +222,7 @@ That totals **≤ 13 HTTP calls**, under CRE's limit of 15.
 
 ### 4.11 Dashboard (Next.js + Tailwind on Vercel, Supabase realtime): **public, read-only**
 The kill switch and admin actions sit behind auth.
+- **Landing view:** the backtest vs. BTC, showing OOS equity curves for algo-only, model A and model B.
 - the funnel
 - backtest charts for each OOS window vs. BTC
 - finalist drill-down with the agent's rationale
@@ -300,6 +305,7 @@ Budget ~1 h of testing per 2 h of feature work. Integrate only tested modules. *
 - [x] Snapshot refreshed just before each CRE run · keep 0.1 HYPE on HyperEVM for gas
 - [x] Score = average percentile rank of 30d Sortino, Calmar/−max drawdown, PnL consistency; maker/taker split as a screening feature; filters ≥ $10k, ≥ 30 days active, ≥ 10 trades
 - [x] Spot-check tolerance ≤ 5% of source equity (default) · type-A unwind: 24 h reduce-only, then 3 trades over 3 h
+- [x] Failed CRE run → hold, retry, alert after 2 failures · copy delay disclosed (replay stretch models it) · agent judges holding time
 - [x] Weights renormalized over active (non-flat) sources · ledger = target, account = truth
 - [x] Executor sanity bounds (frozen set, notional cap) · Pause + Flatten buttons for any team member · Telegram alerts
 - [x] Buckets: Aggressive (live) and Balanced share one source set; Balanced = Aggressive × `m`. Conservative uses a separate vaults + lending universe and copies the sources' lending positions. Balanced and Conservative are backtested + paper-tracked.
